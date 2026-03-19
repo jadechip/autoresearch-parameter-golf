@@ -20,13 +20,7 @@ This is the primary path this repo is built for: official FineWeb data, a 5090 s
 bash scripts/bootstrap.sh
 ```
 
-### 2. Create An Autoresearch Branch
-
-```bash
-git checkout -b autoresearch/<tag>
-```
-
-### 3. Download The Official Parameter Golf Data
+### 2. Download The Official Parameter Golf Data
 
 Use the official cached FineWeb layout mirrored from the upstream contest repo:
 
@@ -40,7 +34,7 @@ That writes the expected local files under:
 - `./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin`
 - `./data/tokenizers/fineweb_1024_bpe.model`
 
-### 4. Run One Baseline Autoresearch Experiment
+### 3. Run One Baseline Autoresearch Experiment
 
 ```bash
 RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh
@@ -52,7 +46,7 @@ This creates:
 - `./runs/autoresearch_5090/index/best.json`
 - `./runs/autoresearch_5090/results.tsv`
 
-### 5. Watch The Run In Another Terminal
+### 4. Watch The Run In Another Terminal
 
 ```bash
 uv run pgolf-monitor ./runs/autoresearch_5090/index/latest.json
@@ -90,7 +84,7 @@ Codex should run on the same machine as the training job so it can edit the repo
 From the repo root:
 
 - start Codex in `/workspace/autoresearch-parameter-golf`
-- keep it on your autoresearch branch
+- let Codex create and manage its own dedicated autoresearch branch
 - give it the bootstrap prompt from `CODEX_AUTORESEARCH_PROMPT.md`
 
 Recommended launch command on a dedicated remote box you control:
@@ -121,7 +115,6 @@ On the 5090 host:
 
 ```bash
 cd /workspace/autoresearch-parameter-golf
-git checkout -b autoresearch/<tag>
 bash scripts/bootstrap.sh
 TRAIN_SHARDS=80 bash scripts/download_official_fineweb.sh
 RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh
@@ -146,6 +139,8 @@ cat CODEX_AUTORESEARCH_PROMPT.md
 ```
 
 Then paste the prompt into Codex.
+
+Codex should create and use its own timestamped branch for the session.
 
 ### 4. What Codex Should Read After Each Run
 

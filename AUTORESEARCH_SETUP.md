@@ -24,19 +24,13 @@ This is the intended Codex workflow on a 5090 host.
 bash scripts/bootstrap.sh
 ```
 
-2. Create an autoresearch branch:
-
-```bash
-git checkout -b autoresearch/<tag>
-```
-
-3. Download the official challenge data once:
+2. Download the official challenge data once:
 
 ```bash
 TRAIN_SHARDS=80 bash scripts/download_official_fineweb.sh
 ```
 
-4. Run one fixed-time 5090 baseline with the autoresearch wrapper:
+3. Run one fixed-time 5090 baseline with the autoresearch wrapper:
 
 ```bash
 RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh
@@ -50,7 +44,7 @@ uv run pgolf-monitor ./runs/autoresearch_5090/index/latest.json
 
 While the run is active, the monitor should open a full-screen terminal UI with the current run id, latest train and validation metrics, a recent-events pane, and live charts for metrics such as loss, LR, bpb, and throughput. Press `q` to quit.
 
-5. Start Codex in the repo root.
+4. Start Codex in the repo root.
 
 Recommended command on a dedicated remote box you control:
 
@@ -60,7 +54,9 @@ codex --dangerously-bypass-approvals-and-sandbox
 
 Then paste the prompt from `CODEX_AUTORESEARCH_PROMPT.md`.
 
-6. Read results from:
+Codex should create and manage its own dedicated autoresearch branch for the session.
+
+5. Read results from:
 
 - `./runs/autoresearch_5090/index/latest.json`
 - `./runs/autoresearch_5090/index/best.json`
@@ -68,7 +64,7 @@ Then paste the prompt from `CODEX_AUTORESEARCH_PROMPT.md`.
 - `./runs/autoresearch_5090/results.tsv`
 - `./runs/autoresearch_5090/runs/<run_id>/metrics.jsonl`
 
-7. Promote only clear 5090 winners to H100 and then 8xH100 rehearsal runs.
+6. Promote only clear 5090 winners to H100 and then 8xH100 rehearsal runs.
 
 ## Agent Guidance
 

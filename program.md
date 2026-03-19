@@ -15,7 +15,8 @@ Your job on the 5090 tier is not to win the final challenge directly. Your job i
 At the start of a session, inspect:
 
 - current git branch
-- recent git history on the autoresearch branch
+- if needed, create a dedicated autoresearch branch for the session
+- recent git history on that autoresearch branch
 - `runs/autoresearch_5090/index/best.json`
 
 Use git history as the experiment memory for what has already been tried and what has already won.
@@ -124,7 +125,7 @@ Avoid spending time on:
 
 ## Search Policy
 
-- Work on a dedicated autoresearch branch.
+- Work on a dedicated autoresearch branch. If one does not already exist for the session, create it yourself.
 - Before proposing a new mutation, inspect recent commits so you do not waste runs repeating the same idea.
 - Use the 5090 autoresearch loop for broad search:
   `bash scripts/run_autoresearch_experiment.sh`

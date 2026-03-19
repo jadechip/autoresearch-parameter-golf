@@ -5,27 +5,28 @@ Use this as the bootstrap prompt for a Codex session running inside this repo on
 Recommended human launch flow:
 
 1. `cd /workspace/autoresearch-parameter-golf`
-2. `git checkout autoresearch/<tag>`
-3. `cat runs/autoresearch_5090/index/best.json`
-4. `git log --oneline -n 10`
-5. start Codex in the repo root with:
+2. start Codex in the repo root with:
    `codex --dangerously-bypass-approvals-and-sandbox`
    Only do this on a dedicated remote box you control for these experiments.
-6. paste the prompt below
+3. paste the prompt below
 
 ```text
 Read program.md and AUTORESEARCH_SETUP.md first.
 
-You are running an autoresearch loop on branch autoresearch/<tag>.
+You are running an autoresearch loop in this repo.
+
+Before doing anything else:
+- inspect the current git branch
+- if you are not already on a dedicated autoresearch branch, create one yourself with a timestamped name like autoresearch/20260319-153000
+- inspect recent commits on that branch
+- inspect runs/autoresearch_5090/index/best.json
 
 Current control files:
 - runs/autoresearch_5090/index/latest.json
 - runs/autoresearch_5090/index/best.json
 
 Before making a new change:
-- inspect the current branch
-- inspect recent commits on the current branch
-- inspect the current best.json
+- inspect the current best.json again if needed
 
 Primary goal:
 - minimize val_bpb
