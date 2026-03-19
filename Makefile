@@ -4,7 +4,7 @@ RUN_ID ?= baseline_5090_5min
 WATCH_PATH ?= ./runs/autoresearch_5090/index/latest.json
 RESULTS_TSV ?= ./runs/autoresearch_5090/results.tsv
 
-.PHONY: install install-cpu smoke-data smoke-train smoke download-data train-5090 autoresearch-baseline watch-latest compare-autoresearch
+.PHONY: install install-cpu smoke-data smoke-train smoke download-data train-5090 autoresearch-baseline watch-latest monitor-latest compare-autoresearch
 
 install:
 	bash scripts/bootstrap.sh
@@ -30,7 +30,10 @@ autoresearch-baseline:
 	RUN_ID=$(RUN_ID) bash scripts/run_autoresearch_experiment.sh
 
 watch-latest:
-	uv run pgolf-watch-run $(WATCH_PATH)
+	uv run pgolf-monitor $(WATCH_PATH)
+
+monitor-latest:
+	uv run pgolf-monitor $(WATCH_PATH)
 
 compare-autoresearch:
 	uv run pgolf-compare-runs --results_tsv $(RESULTS_TSV)

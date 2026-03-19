@@ -465,10 +465,10 @@ def test_watch_run_script_once(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / "metrics.jsonl"
-    assert watch_run.parse_metric_names("matrix_lr,val_bpb") == ("matrix_lr", "val_bpb")
+    assert watch_run.parse_metric_names("matrix_lr,val_bpb,tokens_per_second") == ("matrix_lr", "val_bpb", "tokens_per_second")
     metrics_events = [
         {"schema_version": mod.METRICS_STREAM_VERSION, "event": "run_start", "run_id": "demo", "mode": "train"},
-        {"schema_version": mod.METRICS_STREAM_VERSION, "event": "train", "step": 0, "train_loss": 5.0, "matrix_lr": 0.01, "step_seconds": 1.0},
+        {"schema_version": mod.METRICS_STREAM_VERSION, "event": "train", "step": 0, "train_loss": 5.0, "matrix_lr": 0.01, "step_seconds": 1.0, "total_tokens": 64, "elapsed_training_seconds": 2.0},
         {"schema_version": mod.METRICS_STREAM_VERSION, "event": "val", "phase": "final", "step": 0, "val_loss": 4.5, "val_bpb": 2.0},
         {"schema_version": mod.METRICS_STREAM_VERSION, "event": "summary", "status": "success", "step": 0, "num_steps": 1, "val_bpb": 2.0},
     ]
@@ -519,6 +519,50 @@ def test_watch_run_script_once(tmp_path: Path) -> None:
     )
     assert "matrix_lr" in proc.stdout
     assert "demo" in proc.stdout
+
+
+def test_watch_run_tui_lines_include_recent_events_and_tokens_per_second(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = run_dir / "metrics.jsonl"
+    events = [
+        {"schema_version": mod.METRICS_STREAM_VERSION, "event": "run_start", "run_id": "demo", "mode": "train"},
+        {"schema_version": mod.METRICS_STREAM_VERSION, "event": "train", "step": 3, "train_loss": 4.0, "matrix_lr": 0.01, "step_seconds": 1.0, "total_tokens": 128, "elapsed_training_seconds": 2.0},
+        {"schema_version": mod.METRICS_STREAM_VERSION, "event": "val", "phase": "final", "step": 3, "val_loss": 3.5, "val_bpb": 1.9},
+    ]
+    state = watch_run.collect_run_state(run_dir, metrics_path, run_dir / "results.json", run_dir / "crash.json", events)
+    lines = watch_run.render_tui_lines(state, ("train_loss", "tokens_per_second", "val_bpb"), points=40, width=100, height=30)
+    text = "\n".join(lines)
+    assert "autoresearch-parameter-golf monitor" in text
+    assert "Tok/s:" in text
+    assert "Recent Events" in text
+    assert "val/final" in text
+
+
+def test_watch_run_latest_json_falls_back_to_active_json(tmp_path: Path) -> None:
+    index_dir = tmp_path / "index"
+    run_dir = tmp_path / "runs" / "demo"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    active_json = index_dir / "active.json"
+    active_json.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "run_id": "demo",
+                "output_dir": str(run_dir),
+                "results_path": str(run_dir / "results.json"),
+                "metrics_path": str(run_dir / "metrics.jsonl"),
+                "crash_path": str(run_dir / "crash.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    resolved_run_dir, metrics_path, results_path, crash_path = watch_run.resolve_run_paths(str(index_dir / "latest.json"))
+    assert resolved_run_dir == run_dir
+    assert metrics_path == run_dir / "metrics.jsonl"
+    assert results_path == run_dir / "results.json"
+    assert crash_path == run_dir / "crash.json"
 
 
 def test_compare_runs_render_rows() -> None:

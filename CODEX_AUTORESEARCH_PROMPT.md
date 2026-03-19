@@ -2,6 +2,17 @@
 
 Use this as the bootstrap prompt for a Codex session running inside this repo on the 5090 host.
 
+Recommended human launch flow:
+
+1. `cd /workspace/autoresearch-parameter-golf`
+2. `git checkout autoresearch/<tag>`
+3. `cat runs/autoresearch_5090/index/best.json`
+4. `git log --oneline -n 10`
+5. start Codex in the repo root with:
+   `codex --dangerously-bypass-approvals-and-sandbox`
+   Only do this on a dedicated remote box you control for these experiments.
+6. paste the prompt below
+
 ```text
 Read program.md and AUTORESEARCH_SETUP.md first.
 
@@ -44,10 +55,11 @@ Rules:
 - Continue iterating autonomously until interrupted.
 ```
 
-Recommended launch flow:
+Expected command loop inside Codex:
 
-1. `git checkout autoresearch/<tag>`
-2. `cat runs/autoresearch_5090/index/best.json`
-3. `git log --oneline -n 10`
-4. start Codex in the repo root
-5. paste the prompt above
+1. inspect `runs/autoresearch_5090/index/best.json`
+2. edit `train.py`
+3. run `bash scripts/run_autoresearch_experiment.sh`
+4. inspect `latest.json` and `best.json`
+5. keep or revert
+6. continue

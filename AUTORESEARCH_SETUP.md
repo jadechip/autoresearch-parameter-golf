@@ -16,33 +16,51 @@ For Codex specifically, use:
 
 ## Recommended Setup
 
+This is the intended Codex workflow on a 5090 host.
+
 1. Create an environment:
 
 ```bash
 bash scripts/bootstrap.sh
 ```
 
-2. Download the official challenge data once:
+2. Create an autoresearch branch:
 
 ```bash
-TRAIN_SHARDS=1 bash scripts/download_official_fineweb.sh
+git checkout -b autoresearch/<tag>
 ```
 
-3. Run one fixed-time 5090 baseline with the autoresearch wrapper:
+3. Download the official challenge data once:
 
 ```bash
-bash scripts/run_autoresearch_experiment.sh
+TRAIN_SHARDS=80 bash scripts/download_official_fineweb.sh
+```
+
+4. Run one fixed-time 5090 baseline with the autoresearch wrapper:
+
+```bash
+RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh
 ```
 
 Optional live monitor in a second terminal:
 
 ```bash
-uv run pgolf-watch-run ./runs/autoresearch_5090/index/latest.json
+uv run pgolf-monitor ./runs/autoresearch_5090/index/latest.json
 ```
 
-4. Start Codex in the repo root and paste the prompt from `CODEX_AUTORESEARCH_PROMPT.md`.
+While the run is active, the monitor should open a full-screen terminal UI with the current run id, latest train and validation metrics, a recent-events pane, and live charts for metrics such as loss, LR, bpb, and throughput. Press `q` to quit.
 
-5. Read results from:
+5. Start Codex in the repo root.
+
+Recommended command on a dedicated remote box you control:
+
+```bash
+codex --dangerously-bypass-approvals-and-sandbox
+```
+
+Then paste the prompt from `CODEX_AUTORESEARCH_PROMPT.md`.
+
+6. Read results from:
 
 - `./runs/autoresearch_5090/index/latest.json`
 - `./runs/autoresearch_5090/index/best.json`
@@ -50,7 +68,7 @@ uv run pgolf-watch-run ./runs/autoresearch_5090/index/latest.json
 - `./runs/autoresearch_5090/results.tsv`
 - `./runs/autoresearch_5090/runs/<run_id>/metrics.jsonl`
 
-6. Promote only clear 5090 winners to H100 and then 8xH100 rehearsal runs.
+7. Promote only clear 5090 winners to H100 and then 8xH100 rehearsal runs.
 
 ## Agent Guidance
 
@@ -61,6 +79,7 @@ uv run pgolf-watch-run ./runs/autoresearch_5090/index/latest.json
 - Keep experiments short and comparable under a fixed wall-clock budget.
 - Use `scripts/run_autoresearch_experiment.sh` instead of directly invoking long manual runs.
 - Treat the 5090 loop as a production-proxy search tier, not a toy sandbox.
+- Use git history as experiment memory and commit meaningful winners on the autoresearch branch.
 - If resuming, point `--resume_from` at `output_dir/checkpoints/final.pt` or `latest.pt`.
 
 ## Useful Commands

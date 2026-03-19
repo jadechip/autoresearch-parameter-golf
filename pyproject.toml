@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autoresearch-parameter-golf"
 version = "0.1.0"
-description = "Starter kit and autoresearch-ready experimentation harness for OpenAI Parameter Golf."
+description = "Ongoing autoresearch experiment repo for OpenAI Parameter Golf."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -26,6 +26,7 @@ pgolf-prepare = "prepare:main"
 pgolf-train = "train:main"
 pgolf-validate-results = "validate_results:main"
 pgolf-summarize-artifact = "summarize_artifact:main"
+pgolf-monitor = "watch_run:main"
 pgolf-watch-run = "watch_run:main"
 pgolf-compare-runs = "compare_runs:main"
 

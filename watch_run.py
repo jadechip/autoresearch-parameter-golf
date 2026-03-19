@@ -10,7 +10,7 @@ from typing import Any
 
 
 DEFAULT_PATH = "./runs/autoresearch_5090/index/latest.json"
-DEFAULT_METRICS = ("train_loss", "matrix_lr", "val_bpb", "step_seconds")
+DEFAULT_METRICS = ("train_loss", "val_bpb", "matrix_lr", "tokens_per_second")
 ASCII_LEVELS = " .:-=+*#%@"
 METRIC_FIELDS = {
     "train_loss": ("train", "train_loss"),
@@ -19,6 +19,7 @@ METRIC_FIELDS = {
     "head_lr": ("train", "head_lr"),
     "scalar_lr": ("train", "scalar_lr"),
     "step_seconds": ("train", "step_seconds"),
+    "tokens_per_second": ("train", None),
     "val_loss": ("val", "val_loss"),
     "val_bpb": ("val", "val_bpb"),
 }
@@ -47,6 +48,10 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def resolve_run_paths(path_arg: str) -> tuple[Path, Path, Path, Path]:
     path = Path(path_arg)
+    if not path.exists() and path.name == "latest.json":
+        active_path = path.with_name("active.json")
+        if active_path.is_file():
+            path = active_path
     if path.is_dir():
         run_dir = path
         metrics_path = run_dir / "metrics.jsonl"
@@ -59,7 +64,8 @@ def resolve_run_paths(path_arg: str) -> tuple[Path, Path, Path, Path]:
         run_dir = Path(payload.get("output_dir", path.parent))
         metrics_path = Path(payload.get("metrics_path", run_dir / "metrics.jsonl"))
         results_path = Path(payload.get("results_path", run_dir / "results.json"))
-        return run_dir, metrics_path, results_path, run_dir / "crash.json"
+        crash_path = Path(payload.get("crash_path", run_dir / "crash.json"))
+        return run_dir, metrics_path, results_path, crash_path
     raise ValueError(f"unsupported watch target: {path_arg}")
 
 
@@ -78,15 +84,29 @@ def last_event(events: list[dict[str, Any]], event_name: str) -> dict[str, Any] 
     return None
 
 
+def metric_value(event: dict[str, Any], metric_name: str) -> float | None:
+    _event_name, field_name = METRIC_FIELDS[metric_name]
+    if metric_name == "tokens_per_second":
+        total_tokens = event.get("total_tokens")
+        elapsed = event.get("elapsed_training_seconds")
+        if isinstance(total_tokens, (int, float)) and isinstance(elapsed, (int, float)) and float(elapsed) > 0.0:
+            return float(total_tokens) / float(elapsed)
+        return None
+    value = event.get(field_name) if field_name is not None else None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
 def metric_series(events: list[dict[str, Any]], metric_name: str, limit: int) -> list[float]:
-    event_name, field_name = METRIC_FIELDS[metric_name]
+    event_name, _field_name = METRIC_FIELDS[metric_name]
     values: list[float] = []
     for event in events:
         if event.get("event") != event_name:
             continue
-        value = event.get(field_name)
-        if isinstance(value, (int, float)):
-            values.append(float(value))
+        value = metric_value(event, metric_name)
+        if value is not None:
+            values.append(value)
     return values[-limit:]
 
 
@@ -121,6 +141,95 @@ def format_float(value: Any) -> str:
     return str(value)
 
 
+def compact_path(path: Path, max_len: int) -> str:
+    text = str(path)
+    if len(text) <= max_len:
+        return text
+    keep = max(8, max_len - 3)
+    return "..." + text[-keep:]
+
+
+def current_status(results: dict[str, Any] | None, crash: dict[str, Any] | None) -> str:
+    if results is not None:
+        return str(results.get("status", "success"))
+    if crash is not None:
+        return "failed"
+    return "running"
+
+
+def collect_run_state(
+    run_dir: Path,
+    metrics_path: Path,
+    results_path: Path,
+    crash_path: Path,
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    start_event = last_event(events, "run_start") or {}
+    train_event = last_event(events, "train") or {}
+    val_event = last_event(events, "val") or {}
+    summary_event = last_event(events, "summary") or {}
+    results = load_json(results_path) if results_path.is_file() else None
+    crash = load_json(crash_path) if crash_path.is_file() else None
+    return {
+        "run_dir": run_dir,
+        "metrics_path": metrics_path,
+        "results_path": results_path,
+        "crash_path": crash_path,
+        "events": events,
+        "start_event": start_event,
+        "train_event": train_event,
+        "val_event": val_event,
+        "summary_event": summary_event,
+        "results": results,
+        "crash": crash,
+        "status": current_status(results, crash),
+    }
+
+
+def recent_event_rows(events: list[dict[str, Any]], limit: int) -> list[str]:
+    rows: list[str] = []
+    for event in reversed(events):
+        kind = event.get("event")
+        if kind == "train":
+            rows.append(
+                "step={} train loss={} lr={} tok/s={}".format(
+                    event.get("step", "-"),
+                    format_float(event.get("train_loss")),
+                    format_float(event.get("matrix_lr")),
+                    format_float(metric_value(event, "tokens_per_second")),
+                )
+            )
+        elif kind == "val":
+            rows.append(
+                "step={} val/{} loss={} bpb={}".format(
+                    event.get("step", "-"),
+                    event.get("phase", "-"),
+                    format_float(event.get("val_loss")),
+                    format_float(event.get("val_bpb")),
+                )
+            )
+        elif kind == "summary":
+            rows.append(
+                "summary status={} val_bpb={} total_seconds={}".format(
+                    event.get("status", "-"),
+                    format_float(event.get("val_bpb")),
+                    format_float(event.get("total_seconds")),
+                )
+            )
+        elif kind == "crash":
+            rows.append(
+                "crash {} {}".format(
+                    event.get("error_type", "error"),
+                    str(event.get("error_message", ""))[:80],
+                )
+            )
+        if len(rows) >= limit:
+            break
+    if not rows:
+        rows.append("(no events yet)")
+    return rows
+
+
 def render_dashboard(
     run_dir: Path,
     metrics_path: Path,
@@ -132,19 +241,19 @@ def render_dashboard(
 ) -> str:
     width = shutil.get_terminal_size((100, 30)).columns
     chart_width = max(20, width - 36)
-    start_event = last_event(events, "run_start") or {}
-    train_event = last_event(events, "train") or {}
-    val_event = last_event(events, "val") or {}
-    summary_event = last_event(events, "summary") or {}
-    results = load_json(results_path) if results_path.is_file() else None
-    crash = load_json(crash_path) if crash_path.is_file() else None
+    state = collect_run_state(run_dir, metrics_path, results_path, crash_path, events)
+    start_event = state["start_event"]
+    train_event = state["train_event"]
+    val_event = state["val_event"]
+    results = state["results"]
+    crash = state["crash"]
 
     lines = [
         f"Run Dir: {run_dir}",
         f"Metrics: {metrics_path}",
-        f"Run ID: {start_event.get('run_id', summary_event.get('run_id', '-'))}",
-        f"Mode: {start_event.get('mode', summary_event.get('mode', '-'))}",
-        f"Status: {results.get('status') if results else ('failed' if crash else 'running')}",
+        f"Run ID: {start_event.get('run_id', '-')}",
+        f"Mode: {start_event.get('mode', state['summary_event'].get('mode', '-'))}",
+        f"Status: {state['status']}",
     ]
     if train_event:
         lines.append(
@@ -180,34 +289,200 @@ def render_dashboard(
         series = metric_series(events, metric_name, points)
         last_value = series[-1] if series else None
         chart = sparkline(series, chart_width)
-        lines.append(f"{metric_name:<12} last={format_float(last_value):>12}  {chart}")
+        lines.append(f"{metric_name:<16} last={format_float(last_value):>12}  {chart}")
     return "\n".join(lines)
 
 
+def render_tui_lines(state: dict[str, Any], metric_names: tuple[str, ...], points: int, width: int, height: int) -> list[str]:
+    start_event = state["start_event"]
+    train_event = state["train_event"]
+    val_event = state["val_event"]
+    results = state["results"]
+    crash = state["crash"]
+    events = state["events"]
+
+    usable_width = max(40, width - 1)
+    chart_width = max(20, usable_width - 26)
+    lines = [
+        "autoresearch-parameter-golf monitor  (q to quit)",
+        f"Run: {start_event.get('run_id', '-')}",
+        f"Dir: {compact_path(state['run_dir'], usable_width - 5)}",
+        "Status: {}   Mode: {}   Step: {}".format(
+            state["status"],
+            start_event.get("mode", state["summary_event"].get("mode", "-")),
+            train_event.get("step", val_event.get("step", state["summary_event"].get("step", "-"))),
+        ),
+    ]
+
+    top_metrics = [
+        "Train Loss: {}".format(format_float(train_event.get("train_loss"))),
+        "Val BPB: {}".format(format_float((results or {}).get("val_bpb", val_event.get("val_bpb")))),
+        "Matrix LR: {}".format(format_float(train_event.get("matrix_lr"))),
+        "Tok/s: {}".format(format_float(metric_value(train_event, "tokens_per_second"))),
+        "Step s: {}".format(format_float(train_event.get("step_seconds"))),
+        "Artifact: {}".format((results or {}).get("artifact_bytes", "-")),
+    ]
+    lines.append(" | ".join(top_metrics))
+    if val_event:
+        lines.append(
+            "Last Val: step={} phase={} loss={} bpb={}".format(
+                val_event.get("step", "-"),
+                val_event.get("phase", "-"),
+                format_float(val_event.get("val_loss")),
+                format_float(val_event.get("val_bpb")),
+            )
+        )
+    if results:
+        lines.append(
+            "Result: total_seconds={} peak_vram_mb={}".format(
+                format_float(results.get("total_seconds")),
+                format_float(results.get("peak_vram_mb")),
+            )
+        )
+    if crash:
+        lines.append("Crash: {} {}".format(crash.get("error_type", "error"), str(crash.get("error_message", ""))[: usable_width - 8]))
+    lines.append("-" * usable_width)
+
+    for metric_name in metric_names:
+        series = metric_series(events, metric_name, points)
+        last_value = series[-1] if series else None
+        lo = min(series) if series else None
+        hi = max(series) if series else None
+        lines.append(
+            "{}  last={} min={} max={}".format(
+                metric_name,
+                format_float(last_value),
+                format_float(lo),
+                format_float(hi),
+            )
+        )
+        lines.append(sparkline(series, chart_width))
+
+    lines.append("-" * usable_width)
+    lines.append("Recent Events")
+    for row in recent_event_rows(events, max(3, height - len(lines) - 1)):
+        lines.append(row)
+
+    return [line[:usable_width] for line in lines[: max(1, height)]]
+
+
+def run_plain_loop(
+    run_dir: Path,
+    metrics_path: Path,
+    results_path: Path,
+    crash_path: Path,
+    metric_names: tuple[str, ...],
+    points: int,
+    refresh_seconds: float,
+    once: bool,
+    no_clear: bool,
+    exit_when_complete: bool,
+) -> None:
+    while True:
+        events = load_jsonl(metrics_path)
+        output = render_dashboard(run_dir, metrics_path, results_path, crash_path, events, metric_names, points)
+        if not no_clear and sys.stdout.isatty():
+            print("\033[2J\033[H", end="")
+        print(output, flush=True)
+        done = results_path.is_file() or crash_path.is_file()
+        if once or (exit_when_complete and done):
+            break
+        time.sleep(refresh_seconds)
+
+
+def run_tui_loop(
+    run_dir: Path,
+    metrics_path: Path,
+    results_path: Path,
+    crash_path: Path,
+    metric_names: tuple[str, ...],
+    points: int,
+    refresh_seconds: float,
+    exit_when_complete: bool,
+) -> None:
+    import curses
+
+    def _main(stdscr: Any) -> None:
+        curses.curs_set(0)
+        stdscr.nodelay(True)
+        stdscr.timeout(max(50, int(refresh_seconds * 1000)))
+        while True:
+            events = load_jsonl(metrics_path)
+            state = collect_run_state(run_dir, metrics_path, results_path, crash_path, events)
+            height, width = stdscr.getmaxyx()
+            lines = render_tui_lines(state, metric_names, points, width, height)
+            stdscr.erase()
+            for row_idx, line in enumerate(lines[:height]):
+                try:
+                    stdscr.addnstr(row_idx, 0, line, max(0, width - 1))
+                except curses.error:
+                    pass
+            stdscr.refresh()
+            done = results_path.is_file() or crash_path.is_file()
+            key = stdscr.getch()
+            if key in (ord("q"), ord("Q")):
+                break
+            if exit_when_complete and done:
+                break
+
+    curses.wrapper(_main)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Continuously render a run's metrics.jsonl stream in the terminal.")
+    parser = argparse.ArgumentParser(description="Monitor a run's metrics.jsonl stream in a remote-friendly terminal UI.")
     parser.add_argument("path", nargs="?", default=DEFAULT_PATH, help="Run dir, metrics.jsonl, results.json, or latest.json pointer.")
     parser.add_argument("--metrics", type=str, default=",".join(DEFAULT_METRICS))
     parser.add_argument("--points", type=int, default=80)
-    parser.add_argument("--refresh_seconds", type=float, default=2.0)
+    parser.add_argument("--refresh_seconds", type=float, default=1.0)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--plain", action="store_true")
     parser.add_argument("--no_clear", action="store_true")
     parser.add_argument("--exit_when_complete", action="store_true")
     args = parser.parse_args()
 
     metric_names = parse_metric_names(args.metrics)
     run_dir, metrics_path, results_path, crash_path = resolve_run_paths(args.path)
+    use_plain = args.plain or args.once or not sys.stdout.isatty()
 
-    while True:
-        events = load_jsonl(metrics_path)
-        output = render_dashboard(run_dir, metrics_path, results_path, crash_path, events, metric_names, args.points)
-        if not args.no_clear and sys.stdout.isatty():
-            print("\033[2J\033[H", end="")
-        print(output, flush=True)
-        done = results_path.is_file() or crash_path.is_file()
-        if args.once or (args.exit_when_complete and done):
-            break
-        time.sleep(args.refresh_seconds)
+    if use_plain:
+        run_plain_loop(
+            run_dir=run_dir,
+            metrics_path=metrics_path,
+            results_path=results_path,
+            crash_path=crash_path,
+            metric_names=metric_names,
+            points=args.points,
+            refresh_seconds=args.refresh_seconds,
+            once=args.once,
+            no_clear=args.no_clear,
+            exit_when_complete=args.exit_when_complete,
+        )
+        return
+
+    try:
+        run_tui_loop(
+            run_dir=run_dir,
+            metrics_path=metrics_path,
+            results_path=results_path,
+            crash_path=crash_path,
+            metric_names=metric_names,
+            points=args.points,
+            refresh_seconds=args.refresh_seconds,
+            exit_when_complete=args.exit_when_complete,
+        )
+    except Exception:
+        run_plain_loop(
+            run_dir=run_dir,
+            metrics_path=metrics_path,
+            results_path=results_path,
+            crash_path=crash_path,
+            metric_names=metric_names,
+            points=args.points,
+            refresh_seconds=args.refresh_seconds,
+            once=args.once,
+            no_clear=args.no_clear,
+            exit_when_complete=args.exit_when_complete,
+        )
 
 
 if __name__ == "__main__":

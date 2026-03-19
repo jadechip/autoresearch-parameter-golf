@@ -13,6 +13,7 @@ MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-300}"
 RUN_ID="${RUN_ID:-ar5090-$(date -u +%Y%m%d-%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUNS_DIR/$RUN_ID}"
 LOCK_DIR="$AUTORESEARCH_ROOT/.lock"
+ACTIVE_JSON="$INDEX_DIR/active.json"
 
 mkdir -p "$RUNS_DIR" "$INDEX_DIR"
 
@@ -27,6 +28,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 
 cleanup() {
+  rm -f "$ACTIVE_JSON"
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -37,6 +39,17 @@ echo "CONFIG_JSON=$CONFIG_JSON"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "INDEX_DIR=$INDEX_DIR"
 echo "MAX_WALLCLOCK_SECONDS=$MAX_WALLCLOCK_SECONDS"
+
+cat > "$ACTIVE_JSON" <<EOF
+{
+  "status": "running",
+  "run_id": "$RUN_ID",
+  "output_dir": "$OUTPUT_DIR",
+  "results_path": "$OUTPUT_DIR/results.json",
+  "metrics_path": "$OUTPUT_DIR/metrics.jsonl",
+  "crash_path": "$OUTPUT_DIR/crash.json"
+}
+EOF
 
 set +e
 CONFIG_JSON="$CONFIG_JSON" \
