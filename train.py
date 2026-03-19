@@ -1249,16 +1249,24 @@ class TransformerBlock(nn.Module):
         self.mlp_norm = RMSNorm(cfg.d_model)
         self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots)
         self.mlp = ReLU2MLP(cfg, num_adapter_slots=num_adapter_slots)
-        self.attn_scale = nn.Parameter(torch.ones(cfg.d_model))
-        self.mlp_scale = nn.Parameter(torch.ones(cfg.d_model))
+        scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
+        self.attn_scale = nn.Parameter(torch.ones(scale_shape))
+        self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
 
     def set_global_step(self, step: int) -> None:
         self.attn.set_global_step(step)
         self.mlp.set_global_step(step)
 
+    def residual_scale(self, scale: nn.Parameter, x: Tensor, slot: int | None) -> Tensor:
+        if scale.ndim == 2:
+            if slot is None:
+                raise RuntimeError("per-loop residual scales require a loop slot")
+            return scale[slot].to(dtype=x.dtype)
+        return scale.to(dtype=x.dtype)
+
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
-        x = x + self.attn(self.attn_norm(x), slot=slot) * self.attn_scale.to(dtype=x.dtype)
-        x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.mlp_scale.to(dtype=x.dtype)
+        x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
+        x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         return x
 
 
