@@ -403,21 +403,6 @@ def widen_recurrent_mlp_on_deep_tail(model_cfg: ModelConfig) -> None:
     model_cfg.shared_mlp_hidden_bonus = model_cfg.d_model // 4
 
 
-def lower_matrix_lr_on_accepted_deep_tail(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 7:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model // 4:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if model_cfg.fake_quant_start_step != 20:
-        return
-    if not math.isclose(cfg.optim.matrix_lr, 0.012, rel_tol=0.0, abs_tol=1e-12):
-        return
-    cfg.optim.matrix_lr = 0.010
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -3008,7 +2993,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     reallocate_third_shared_layer_into_tail(cfg.model)
     move_fake_quant_to_warmup_boundary_on_deep_tail(cfg.model)
     widen_recurrent_mlp_on_deep_tail(cfg.model)
-    lower_matrix_lr_on_accepted_deep_tail(cfg)
     return cfg
 
 
