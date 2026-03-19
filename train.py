@@ -1334,17 +1334,18 @@ class RecurrentGPT(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
-        non_recurrent_hidden_bonus = cfg.d_model // 2
+        stem_hidden_bonus = cfg.d_model // 2
+        tail_hidden_bonus = stem_hidden_bonus if cfg.tail_layers < 5 else cfg.d_model // 4
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
         self.stem = nn.ModuleList(
-            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.stem_layers)]
+            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=stem_hidden_bonus) for _ in range(cfg.stem_layers)]
         )
         self.shared = nn.ModuleList(
             [TransformerBlock(cfg, num_adapter_slots=cfg.recurrence_loops) for _ in range(cfg.shared_layers)]
         )
         self.tail = nn.ModuleList(
-            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.tail_layers)]
+            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=tail_hidden_bonus) for _ in range(cfg.tail_layers)]
         )
         self.final_norm = RMSNorm(cfg.d_model)
         self.lm_head = None if cfg.tie_embeddings else FakeQuantLinear(
