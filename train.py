@@ -320,6 +320,24 @@ def train_config_from_dict(data: Mapping[str, Any]) -> TrainConfig:
     return cfg
 
 
+def rebalance_shared_layers_vs_loops(model_cfg: ModelConfig) -> None:
+    total_recurrent_applications = model_cfg.shared_layers * model_cfg.recurrence_loops
+    if total_recurrent_applications < 8:
+        return
+    if model_cfg.shared_layers <= 0 or model_cfg.recurrence_loops < 4:
+        return
+    if model_cfg.recurrence_loops < model_cfg.shared_layers * 2:
+        return
+    target_loops = max(2, model_cfg.recurrence_loops // 2)
+    if total_recurrent_applications % target_loops != 0:
+        return
+    target_shared_layers = total_recurrent_applications // target_loops
+    if target_shared_layers <= model_cfg.shared_layers:
+        return
+    model_cfg.shared_layers = target_shared_layers
+    model_cfg.recurrence_loops = target_loops
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2894,6 +2912,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         cfg.benchmark_only = True
     if args.evaluate_only:
         cfg.evaluate_only = True
+    rebalance_shared_layers_vs_loops(cfg.model)
     return cfg
 
 
