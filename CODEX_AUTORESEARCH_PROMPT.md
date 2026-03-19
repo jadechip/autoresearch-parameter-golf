@@ -1,6 +1,14 @@
 # Codex Autoresearch Prompt
 
-Use this as the bootstrap prompt for a Codex session running inside this repo on the 5090 host.
+Use this as the bootstrap prompt for an interactive Codex session running inside this repo on the 5090 host.
+
+For overnight / continuously restarted execution, prefer:
+
+```bash
+bash scripts/run_codex_autoresearch_loop.sh
+```
+
+That supervisor uses `CODEX_AUTORESEARCH_ONE_SHOT_PROMPT.md` and launches a fresh `codex exec` for each iteration.
 
 Recommended human launch flow:
 

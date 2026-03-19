@@ -46,6 +46,18 @@ def notes_path(state_dir: Path) -> Path:
     return state_dir / "notes.md"
 
 
+def activity_log_path(state_dir: Path) -> Path:
+    return state_dir / "activity.log"
+
+
+def errors_log_path(state_dir: Path) -> Path:
+    return state_dir / "errors.log"
+
+
+def runs_dir_path(state_dir: Path) -> Path:
+    return state_dir / "runs"
+
+
 def git_output(args: list[str], cwd: Path | None = None) -> str:
     proc = subprocess.run(
         args,
@@ -133,6 +145,13 @@ def ensure_notes_file(state_dir: Path) -> None:
     )
 
 
+def ensure_loop_support_files(state_dir: Path) -> None:
+    runs_dir_path(state_dir).mkdir(parents=True, exist_ok=True)
+    for path in (activity_log_path(state_dir), errors_log_path(state_dir)):
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+
+
 def init_session(state_dir: Path, baseline_results_path: Path, force: bool = False) -> dict[str, Any]:
     state_dir.mkdir(parents=True, exist_ok=True)
     path = session_path(state_dir)
@@ -183,6 +202,7 @@ def init_session(state_dir: Path, baseline_results_path: Path, force: bool = Fal
     }
     write_session(state_dir, session)
     ensure_notes_file(state_dir)
+    ensure_loop_support_files(state_dir)
     append_experiment_event(
         state_dir,
         {

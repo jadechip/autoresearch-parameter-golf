@@ -4,7 +4,7 @@ RUN_ID ?= baseline_5090_5min
 WATCH_PATH ?= ./runs/autoresearch_5090/index/latest.json
 RESULTS_TSV ?= ./runs/autoresearch_5090/results.tsv
 
-.PHONY: install install-cpu smoke-data smoke-train smoke download-data train-5090 autoresearch-baseline init-autoresearch-session watch-latest monitor-latest tensorboard-autoresearch compare-autoresearch
+.PHONY: install install-cpu smoke-data smoke-train smoke download-data train-5090 autoresearch-baseline init-autoresearch-session codex-autoresearch-loop watch-latest monitor-latest tensorboard-autoresearch compare-autoresearch
 
 install:
 	bash scripts/bootstrap.sh
@@ -31,6 +31,9 @@ autoresearch-baseline:
 
 init-autoresearch-session:
 	bash scripts/init_autoresearch_session.sh
+
+codex-autoresearch-loop:
+	bash scripts/run_codex_autoresearch_loop.sh
 
 watch-latest:
 	bash scripts/run_tensorboard_autoresearch.sh

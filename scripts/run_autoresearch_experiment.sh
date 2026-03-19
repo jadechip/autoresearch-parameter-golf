@@ -4,6 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+run_python() {
+  if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+    "$ROOT_DIR/.venv/bin/python" "$@"
+  else
+    uv run python "$@"
+  fi
+}
+
 AUTORESEARCH_ROOT="${AUTORESEARCH_ROOT:-$ROOT_DIR/runs/autoresearch_5090}"
 RUNS_DIR="${RUNS_DIR:-$AUTORESEARCH_ROOT/runs}"
 INDEX_DIR="${INDEX_DIR:-$AUTORESEARCH_ROOT/index}"
@@ -27,7 +35,7 @@ fi
 
 USE_SESSION_STATE=0
 if [[ -f "$SESSION_JSON" ]]; then
-  uv run python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" require-ready >/dev/null
+  run_python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" require-ready >/dev/null
   USE_SESSION_STATE=1
 elif [[ "$ALLOW_UNINITIALIZED_SESSION" == "1" || "$RUN_ID" == baseline_* ]]; then
   echo "No autoresearch session found at $SESSION_JSON; allowing baseline/manual run." >&2
@@ -46,7 +54,7 @@ fi
 
 cleanup() {
   if [[ "$USE_SESSION_STATE" == "1" && ! -f "$OUTPUT_DIR/results.json" ]]; then
-    uv run python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "wrapper_cleanup" >/dev/null 2>&1 || true
+    run_python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "wrapper_cleanup" >/dev/null 2>&1 || true
   fi
   rm -f "$ACTIVE_JSON"
   rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -73,7 +81,7 @@ cat > "$ACTIVE_JSON" <<EOF
 EOF
 
 if [[ "$USE_SESSION_STATE" == "1" ]]; then
-  uv run python "$ROOT_DIR/scripts/autoresearch_state.py" \
+  run_python "$ROOT_DIR/scripts/autoresearch_state.py" \
     --state_dir "$STATE_DIR" \
     start-run \
     --run_id "$RUN_ID" \
@@ -95,12 +103,12 @@ set -e
 
 RESULTS_JSON="$OUTPUT_DIR/results.json"
 if [[ -f "$RESULTS_JSON" ]]; then
-  uv run python "$ROOT_DIR/scripts/index_autoresearch_run.py" "$RESULTS_JSON" --index_dir "$INDEX_DIR"
+  run_python "$ROOT_DIR/scripts/index_autoresearch_run.py" "$RESULTS_JSON" --index_dir "$INDEX_DIR"
   if [[ "$USE_SESSION_STATE" == "1" ]]; then
-    uv run python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" finish-run --results_json "$RESULTS_JSON" >/dev/null
+    run_python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" finish-run --results_json "$RESULTS_JSON" >/dev/null
   fi
 elif [[ "$USE_SESSION_STATE" == "1" ]]; then
-  uv run python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "missing_results_json" >/dev/null
+  run_python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "missing_results_json" >/dev/null
 fi
 
 if [[ $status -ne 0 ]]; then

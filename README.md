@@ -95,7 +95,28 @@ TensorBoard will show:
 
 This is a Codex-first repo. The intended loop is that Codex edits `train.py`, launches one experiment, reads structured outputs, and iterates.
 
-### 1. Start Codex In The Repo Root
+### 1. Preferred Overnight Mode: Fresh `codex exec` Iterations
+
+For long-running autonomous search, prefer the supervisor loop:
+
+```bash
+bash scripts/run_codex_autoresearch_loop.sh
+```
+
+This is the closest match to Ralph's execution model:
+
+- one fresh `codex exec` process per iteration
+- one experiment per invocation
+- on-disk `.autoresearch/` state as memory
+- the outer shell loop keeps the search running overnight
+
+Loop logs land in:
+
+- `./.autoresearch/activity.log`
+- `./.autoresearch/errors.log`
+- `./.autoresearch/runs/`
+
+### 2. Interactive Mode: Start Codex In The Repo Root
 
 Codex should run on the same machine as the training job so it can edit the repo and launch experiments locally.
 
@@ -116,7 +137,7 @@ The two files Codex should read first are:
 - `CODEX_AUTORESEARCH_PROMPT.md` for the bootstrap prompt
 - `program.md` for the durable search policy
 
-### 2. What Codex Should Do
+### 3. What Codex Should Do
 
 The expected Codex behavior is:
 
@@ -129,7 +150,7 @@ The expected Codex behavior is:
 - use git history as experiment memory
 - cover structural / byte-allocation directions early instead of only micro-tuning optimizer values
 
-### 3. Exact Human Setup For Codex
+### 4. Exact Human Setup For Codex
 
 On the 5090 host:
 
@@ -147,7 +168,13 @@ Then in one terminal:
 bash scripts/run_tensorboard_autoresearch.sh
 ```
 
-And in the Codex terminal:
+For the preferred overnight loop:
+
+```bash
+bash scripts/run_codex_autoresearch_loop.sh
+```
+
+Or in a supervised interactive Codex terminal:
 
 ```bash
 codex --dangerously-bypass-approvals-and-sandbox
@@ -161,9 +188,11 @@ cat CODEX_AUTORESEARCH_PROMPT.md
 
 Then paste the prompt into Codex.
 
-Codex should create and use its own timestamped branch for the session.
+The loop script uses `CODEX_AUTORESEARCH_ONE_SHOT_PROMPT.md` and launches a fresh `codex exec` each iteration.
 
-### 4. What Codex Should Read After Each Run
+Interactive Codex should create and use its own timestamped branch for the session.
+
+### 5. What Codex Should Read After Each Run
 
 Codex should use structured files, not logs:
 
@@ -173,6 +202,7 @@ Codex should use structured files, not logs:
 - `./runs/autoresearch_5090/runs/<run_id>/metrics.jsonl`
 - `./.autoresearch/session.json`
 - `./.autoresearch/experiments.jsonl`
+- `./.autoresearch/notes.md`
 
 `latest.json` is the current run/result pointer. `best.json` is the standing best candidate.
 `.autoresearch/session.json` is the readiness gate and accepted-state ledger.
@@ -213,9 +243,11 @@ This repo exists as an ongoing experiment setup:
 - `prepare.py`: fixed prep and artifact-eval utilities
 - `program.md`: agent contract
 - `CODEX_AUTORESEARCH_PROMPT.md`: copy/paste Codex prompt
+- `CODEX_AUTORESEARCH_ONE_SHOT_PROMPT.md`: one-iteration prompt for the overnight loop
 - `AUTORESEARCH_SETUP.md`: longer setup notes
 - `scripts/autoresearch_state.py`: lightweight Ralph-style session state helper
 - `scripts/init_autoresearch_session.sh`: creates `.autoresearch/session.json`
+- `scripts/run_codex_autoresearch_loop.sh`: fresh `codex exec` supervisor loop
 - `scripts/run_autoresearch_experiment.sh`: one fixed-budget autoresearch run
 - `scripts/runpod_5090_train.sh`: manual single-GPU training wrapper
 

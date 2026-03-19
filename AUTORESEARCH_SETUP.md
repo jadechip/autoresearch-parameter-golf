@@ -12,6 +12,7 @@ This repo is structured so an external search loop can treat:
 For Codex specifically, use:
 
 - `CODEX_AUTORESEARCH_PROMPT.md` as the copy/paste bootstrap prompt
+- `CODEX_AUTORESEARCH_ONE_SHOT_PROMPT.md` for the non-interactive loop runner
 - `program.md` as the durable search policy / contract
 
 ## Recommended Setup
@@ -82,7 +83,21 @@ Then paste the prompt from `CODEX_AUTORESEARCH_PROMPT.md`.
 
 Codex should create and manage its own dedicated autoresearch branch for the session.
 
-5. Read results from:
+For overnight/autonomous execution, prefer the Ralph-style supervisor loop instead of one long interactive Codex chat:
+
+```bash
+bash scripts/run_codex_autoresearch_loop.sh
+```
+
+This launches a fresh `codex exec` for each iteration using `CODEX_AUTORESEARCH_ONE_SHOT_PROMPT.md`.
+
+The loop writes additional local state under:
+
+- `./.autoresearch/activity.log`
+- `./.autoresearch/errors.log`
+- `./.autoresearch/runs/`
+
+7. Read results from:
 
 - `./runs/autoresearch_5090/index/latest.json`
 - `./runs/autoresearch_5090/index/best.json`
@@ -91,6 +106,7 @@ Codex should create and manage its own dedicated autoresearch branch for the ses
 - `./runs/autoresearch_5090/runs/<run_id>/metrics.jsonl`
 - `./.autoresearch/session.json`
 - `./.autoresearch/experiments.jsonl`
+- `./.autoresearch/notes.md`
 
 6. Promote only clear 5090 winners to H100 and then 8xH100 rehearsal runs.
 
@@ -99,6 +115,7 @@ Codex should create and manage its own dedicated autoresearch branch for the ses
 - Prefer editing `train.py` only.
 - Read `program.md` before mutating anything.
 - Read `CODEX_AUTORESEARCH_PROMPT.md` when starting a fresh Codex session.
+- Read `CODEX_AUTORESEARCH_ONE_SHOT_PROMPT.md` when running the supervised overnight loop.
 - Reject stdout scraping. Use structured files.
 - Keep experiments short and comparable under a fixed wall-clock budget.
 - Use `scripts/run_autoresearch_experiment.sh` instead of directly invoking long manual runs.

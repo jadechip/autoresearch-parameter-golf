@@ -4,6 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+run_python() {
+  if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+    "$ROOT_DIR/.venv/bin/python" "$@"
+  else
+    uv run python "$@"
+  fi
+}
+
 STATE_DIR="${STATE_DIR:-$ROOT_DIR/.autoresearch}"
 BASELINE_RESULTS="${BASELINE_RESULTS:-$ROOT_DIR/runs/autoresearch_5090/index/latest.json}"
 FORCE_FLAG=()
@@ -15,7 +23,7 @@ echo "Initializing autoresearch session"
 echo "STATE_DIR=$STATE_DIR"
 echo "BASELINE_RESULTS=$BASELINE_RESULTS"
 
-exec uv run python "$ROOT_DIR/scripts/autoresearch_state.py" \
+run_python "$ROOT_DIR/scripts/autoresearch_state.py" \
   --state_dir "$STATE_DIR" \
   init \
   --baseline_results "$BASELINE_RESULTS" \

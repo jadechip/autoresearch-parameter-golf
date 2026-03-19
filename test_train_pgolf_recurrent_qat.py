@@ -677,6 +677,9 @@ def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path) -> None
     assert session["search_policy"]["artifact_target_bytes_max"] == 12_000_000
     assert session["search_policy"]["max_consecutive_losing_micro_experiments"] == 3
     assert (state_dir / "notes.md").is_file()
+    assert (state_dir / "activity.log").is_file()
+    assert (state_dir / "errors.log").is_file()
+    assert (state_dir / "runs").is_dir()
     notes_text = (state_dir / "notes.md").read_text(encoding="utf-8")
     assert "Structural campaign checklist" in notes_text
     assert "- [ ] d_model" in notes_text
@@ -731,6 +734,70 @@ def test_run_autoresearch_experiment_requires_initialized_session(tmp_path: Path
     )
     assert proc.returncode == 2
     assert "No autoresearch session found" in proc.stderr
+
+
+def test_run_codex_autoresearch_loop_invokes_fresh_codex_exec(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".autoresearch"
+    baseline_results = write_fake_results(tmp_path / "baseline" / "results.json", run_id="baseline", val_bpb=1.80)
+    autoresearch_state.init_session(state_dir, baseline_results)
+
+    args_capture = tmp_path / "codex_args.txt"
+    fake_codex = tmp_path / "fake_codex.sh"
+    fake_codex.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "args_file=\"__ARGS__\"\n"
+        "last_message=\"\"\n"
+        "args=()\n"
+        "while [[ $# -gt 0 ]]; do\n"
+        "  case \"$1\" in\n"
+        "    --output-last-message)\n"
+        "      last_message=\"$2\"\n"
+        "      shift 2\n"
+        "      ;;\n"
+        "    *)\n"
+        "      args+=(\"$1\")\n"
+        "      shift\n"
+        "      ;;\n"
+        "  esac\n"
+        "done\n"
+        "printf '%s\\n' \"${args[@]}\" > \"$args_file\"\n"
+        "if [[ -n \"$last_message\" ]]; then\n"
+        "  printf 'completed one iteration\\n' > \"$last_message\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_codex.write_text(
+        fake_codex.read_text(encoding="utf-8")
+        .replace("__ARGS__", str(args_capture)),
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("one-shot prompt body\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["STATE_DIR"] = str(state_dir)
+    env["CODEX_BIN"] = str(fake_codex)
+    env["PROMPT_FILE"] = str(prompt_file)
+    env["MAX_ITERATIONS"] = "1"
+    env["SLEEP_SECONDS"] = "0"
+    proc = subprocess.run(
+        ["bash", "scripts/run_codex_autoresearch_loop.sh"],
+        cwd=Path(__file__).parent,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0
+    assert "codex_loop_start" in (state_dir / "activity.log").read_text(encoding="utf-8")
+    assert "iteration_complete" in (state_dir / "activity.log").read_text(encoding="utf-8")
+    assert "exec" in args_capture.read_text(encoding="utf-8")
+    assert "-C" in args_capture.read_text(encoding="utf-8")
+    assert any((state_dir / "runs").glob("codex-iteration-*.log"))
+    assert any((state_dir / "runs").glob("codex-iteration-*.last.txt"))
 
 
 @pytest.mark.cuda

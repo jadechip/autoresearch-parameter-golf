@@ -64,6 +64,7 @@ Use structured files instead:
 - `summarize_artifact.py`
 - `scripts/autoresearch_state.py`
 - `scripts/init_autoresearch_session.sh`
+- `scripts/run_codex_autoresearch_loop.sh`
 - `scripts/run_autoresearch_experiment.sh`
 - `scripts/index_autoresearch_run.py`
 - `program.md`
