@@ -9,10 +9,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+import plotext as plt
+
 
 DEFAULT_PATH = "./runs/autoresearch_5090/index/latest.json"
 DEFAULT_METRICS = ("train_loss", "val_bpb", "matrix_lr", "tokens_per_second")
-ASCII_LEVELS = " .:-=+*#%@"
 METRIC_FIELDS = {
     "train_loss": ("train", "train_loss"),
     "matrix_lr": ("train", "matrix_lr"),
@@ -111,71 +112,33 @@ def metric_series(events: list[dict[str, Any]], metric_name: str, limit: int) ->
     return values[-limit:]
 
 
-def sparkline(values: list[float], width: int) -> str:
-    if width <= 0:
-        return ""
+def build_plotext_chart_lines(title: str, values: list[float], width: int, height: int) -> list[str]:
+    plot_width = max(24, width)
+    plot_height = max(6, height)
     if not values:
-        return "(no data)"
-    if len(values) > width:
-        step = len(values) / width
-        sampled = [values[min(int(i * step), len(values) - 1)] for i in range(width)]
-    else:
-        sampled = values
-    lo = min(sampled)
-    hi = max(sampled)
-    if hi <= lo:
-        glyph = ASCII_LEVELS[len(ASCII_LEVELS) // 2]
-        return glyph * max(1, len(sampled))
-    chars = []
-    scale = len(ASCII_LEVELS) - 1
-    for value in sampled:
-        idx = int(round((value - lo) / (hi - lo) * scale))
-        chars.append(ASCII_LEVELS[max(0, min(scale, idx))])
-    return "".join(chars)
-
-
-def sample_series(values: list[float], width: int) -> list[float]:
-    if width <= 0 or not values:
-        return []
-    if len(values) <= width:
-        return values
-    step = len(values) / width
-    return [values[min(int(i * step), len(values) - 1)] for i in range(width)]
-
-
-def render_line_plot(values: list[float], width: int, height: int) -> list[str]:
-    plot_width = max(8, width)
-    plot_height = max(3, height)
-    if not values:
-        return [" " * plot_width for _ in range(plot_height)]
-
-    sampled = sample_series(values, plot_width)
-    lo = min(sampled)
-    hi = max(sampled)
-    if hi <= lo:
-        row_positions = [plot_height // 2 for _ in sampled]
-    else:
-        row_positions = [
-            int(round((1.0 - ((value - lo) / (hi - lo))) * (plot_height - 1)))
-            for value in sampled
+        empty = [
+            title[:plot_width].center(plot_width),
+            "(no data yet)".center(plot_width),
         ]
+        while len(empty) < plot_height:
+            empty.append(" " * plot_width)
+        return empty[:plot_height]
 
-    grid = [[" " for _ in range(len(sampled))] for _ in range(plot_height)]
-    prev_row: int | None = None
-    prev_col: int | None = None
-    for col, row in enumerate(row_positions):
-        grid[row][col] = "*"
-        if prev_row is not None and prev_col is not None:
-            gap = col - prev_col
-            if gap > 1:
-                for delta in range(1, gap):
-                    interp_col = prev_col + delta
-                    interp_row = int(round(prev_row + (row - prev_row) * (delta / gap)))
-                    if grid[interp_row][interp_col] == " ":
-                        grid[interp_row][interp_col] = "."
-        prev_row = row
-        prev_col = col
-    return ["".join(row) for row in grid]
+    plt.clf()
+    plt.theme("clear")
+    plt.plotsize(plot_width, plot_height)
+    plt.frame(True)
+    plt.grid(False, False)
+    plt.xfrequency(min(4, max(2, plot_width // 16)))
+    plt.yfrequency(min(4, max(2, plot_height - 4)))
+    plt.title(title[: max(8, plot_width - 2)])
+    xs = list(range(1, len(values) + 1))
+    plt.plot(xs, values)
+    canvas = plt.uncolorize(plt.build())
+    lines = canvas.splitlines()
+    if len(lines) < plot_height:
+        lines.extend([" " * plot_width] * (plot_height - len(lines)))
+    return [line[:plot_width].ljust(plot_width) for line in lines[:plot_height]]
 
 
 def format_float(value: Any) -> str:
@@ -376,7 +339,7 @@ def render_dashboard(
         )
     if val_event:
         lines.append(
-            "Last Val: step={} phase={} val_loss={} val_bpb={}".format(
+            "Last Val: step={} val/{} val_loss={} val_bpb={}".format(
                 val_event.get("step", "-"),
                 val_event.get("phase", "-"),
                 format_float(val_event.get("val_loss")),
@@ -399,7 +362,7 @@ def render_dashboard(
         series = metric_series(events, metric_name, points)
         last_value = series[-1] if series else None
         lines.append(f"{metric_name:<16} last={format_float(last_value):>12}")
-        for plot_line in render_line_plot(series, chart_width, 4):
+        for plot_line in build_plotext_chart_lines(metric_name, series, chart_width, 10):
             lines.append(plot_line)
         lines.append("")
 
@@ -408,7 +371,12 @@ def render_dashboard(
         recent_runs = load_results_rows(state["results_tsv_path"], limit=12)
     if recent_runs:
         lines.append("Recent Run History (val_bpb, lower is better)")
-        for plot_line in render_line_plot(recent_run_series(recent_runs, "val_bpb", 12), chart_width, 4):
+        for plot_line in build_plotext_chart_lines(
+            "recent val_bpb",
+            recent_run_series(recent_runs, "val_bpb", 12),
+            chart_width,
+            10,
+        ):
             lines.append(plot_line)
         lines.extend(recent_run_rows(recent_runs, limit=5, width=width))
     return "\n".join(lines)
@@ -426,7 +394,7 @@ def render_tui_lines(state: dict[str, Any], metric_names: tuple[str, ...], point
     num_cols = 2 if usable_width >= 96 and len(metric_names) > 1 else 1
     gap = 3
     panel_width = (usable_width - (gap * (num_cols - 1))) // num_cols
-    chart_height = 6 if height >= 34 else 4
+    chart_height = 6 if height >= 34 else 5
     lines = [
         "autoresearch-parameter-golf monitor  (q to quit)",
         f"Run: {start_event.get('run_id', '-')}",
@@ -449,7 +417,7 @@ def render_tui_lines(state: dict[str, Any], metric_names: tuple[str, ...], point
     lines.append(" | ".join(top_metrics))
     if val_event:
         lines.append(
-            "Last Val: step={} phase={} loss={} bpb={}".format(
+            "Last Val: step={} val/{} loss={} bpb={}".format(
                 val_event.get("step", "-"),
                 val_event.get("phase", "-"),
                 format_float(val_event.get("val_loss")),
@@ -473,7 +441,7 @@ def render_tui_lines(state: dict[str, Any], metric_names: tuple[str, ...], point
         last_value = series[-1] if series else None
         lo = min(series) if series else None
         hi = max(series) if series else None
-        panel = [
+        panel_lines = [
             "{} last={} min={} max={}".format(
                 metric_name,
                 format_float(last_value),
@@ -481,15 +449,20 @@ def render_tui_lines(state: dict[str, Any], metric_names: tuple[str, ...], point
                 format_float(hi),
             )[:panel_width].ljust(panel_width),
         ]
-        plot_lines = render_line_plot(series, max(8, panel_width), chart_height)
-        panel.extend(line[:panel_width].ljust(panel_width) for line in plot_lines)
-        metric_panels.append(panel)
+        panel_lines.extend(build_plotext_chart_lines(metric_name, series, panel_width, chart_height))
+        metric_panels.append(panel_lines)
 
-    panel_height = 1 + chart_height
+    panel_height = max(len(panel) for panel in metric_panels) if metric_panels else 0
     for row_start in range(0, len(metric_panels), num_cols):
         row_panels = metric_panels[row_start : row_start + num_cols]
         while len(row_panels) < num_cols:
             row_panels.append([" " * panel_width for _ in range(panel_height)])
+        row_panels = [
+            panel + [" " * panel_width for _ in range(panel_height - len(panel))]
+            if len(panel) < panel_height
+            else panel
+            for panel in row_panels
+        ]
         for line_idx in range(panel_height):
             lines.append((" " * gap).join(panel[line_idx] for panel in row_panels)[:usable_width])
         lines.append("")
@@ -499,20 +472,24 @@ def render_tui_lines(state: dict[str, Any], metric_names: tuple[str, ...], point
         recent_runs = load_results_rows(state["results_tsv_path"], limit=16)
 
     remaining_lines = max(0, height - len(lines))
-    if recent_runs and remaining_lines >= 8:
+    if recent_runs and remaining_lines >= 4:
         reserve_for_events = 4
         history_space = max(0, remaining_lines - reserve_for_events)
-        history_height = min(6 if height >= 34 else 4, max(2, history_space - 4))
-        history_row_limit = max(1, min(3, history_space - 2 - history_height))
         lines.append("-" * usable_width)
         lines.append("Recent Run History (val_bpb, lower is better)")
-        for plot_line in render_line_plot(
-            recent_run_series(recent_runs, "val_bpb", max(8, min(16, points))),
-            usable_width,
-            history_height,
-        ):
-            lines.append(plot_line[:usable_width].ljust(usable_width))
-        lines.extend(recent_run_rows(recent_runs, limit=history_row_limit, width=usable_width))
+        if history_space >= 10:
+            history_height = min(6 if height >= 34 else 5, max(4, history_space - 4))
+            history_row_limit = max(1, min(2, history_space - 2 - history_height))
+            for plot_line in build_plotext_chart_lines(
+                "recent val_bpb",
+                recent_run_series(recent_runs, "val_bpb", max(8, min(16, points))),
+                usable_width,
+                history_height,
+            ):
+                lines.append(plot_line[:usable_width].ljust(usable_width))
+            lines.extend(recent_run_rows(recent_runs, limit=history_row_limit, width=usable_width))
+        else:
+            lines.extend(recent_run_rows(recent_runs, limit=max(1, min(2, history_space - 1)), width=usable_width))
         lines.append("")
 
     remaining_lines = max(0, height - len(lines))

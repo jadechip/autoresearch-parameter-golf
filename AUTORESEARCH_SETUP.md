@@ -42,7 +42,7 @@ Optional live monitor in a second terminal:
 uv run pgolf-monitor ./runs/autoresearch_5090/index/latest.json
 ```
 
-While the run is active, the monitor should open a full-screen terminal UI with the current run id, latest train and validation metrics, live multi-row plots for metrics such as loss, LR, bpb, and throughput, a recent-run history section for completed experiments, and a recent-events pane. Press `q` to quit.
+While the run is active, the monitor should open a full-screen `plotext`-based terminal UI with the current run id, latest train and validation metrics, library-rendered charts for metrics such as loss, LR, bpb, and throughput, a recent-run history section for completed experiments, and a recent-events pane. Press `q` to quit.
 
 4. Start Codex in the repo root.
 

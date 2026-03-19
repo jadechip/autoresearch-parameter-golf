@@ -2,6 +2,33 @@ version = 1
 requires-python = ">=3.12, <3.14"
 
 [[package]]
+name = "autoresearch-parameter-golf"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy" },
+    { name = "plotext" },
+    { name = "torch" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+tokenizer = [
+    { name = "sentencepiece" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = "==2.3.3" },
+    { name = "plotext", specifier = "==5.3.2" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = "==9.0.2" },
+    { name = "sentencepiece", marker = "extra == 'tokenizer'", specifier = "==0.2.1" },
+    { name = "torch", specifier = "==2.9.0" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -308,28 +335,12 @@ wheels = [
 ]
 
 [[package]]
-name = "autoresearch-parameter-golf"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "numpy" },
-    { name = "torch" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-tokenizer = [
-    { name = "sentencepiece" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy", specifier = "==2.3.3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = "==9.0.2" },
-    { name = "sentencepiece", marker = "extra == 'tokenizer'", specifier = "==0.2.1" },
-    { name = "torch", specifier = "==2.9.0" },
+name = "plotext"
+version = "5.3.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/d7/f75f397af966fe252d0d34ffd3cae765317fce2134f925f95e7d6725d1ce/plotext-5.3.2.tar.gz", hash = "sha256:52d1e932e67c177bf357a3f0fe6ce14d1a96f7f7d5679d7b455b929df517068e", size = 61967 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f6/1e/12fe7c40cd2099a1f454518754ed229b01beaf3bbb343127f0cc13ce6c22/plotext-5.3.2-py3-none-any.whl", hash = "sha256:394362349c1ddbf319548cfac17ca65e6d5dfc03200c40dfdc0503b3e95a2283", size = 64047 },
 ]
 
 [[package]]

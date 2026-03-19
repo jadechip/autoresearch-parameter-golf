@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
   "numpy==2.3.3",
+  "plotext==5.3.2",
   "torch==2.9.0",
 ]
 
