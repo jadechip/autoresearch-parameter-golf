@@ -81,7 +81,9 @@ Codex should create and manage its own dedicated autoresearch branch for the ses
 - Keep experiments short and comparable under a fixed wall-clock budget.
 - Use `scripts/run_autoresearch_experiment.sh` instead of directly invoking long manual runs.
 - Treat the 5090 loop as a production-proxy search tier, not a toy sandbox.
-- Use git history as experiment memory and commit meaningful winners on the autoresearch branch.
+- Use git history as experiment memory.
+- Commit every experiment attempt before running it.
+- Keep winners as normal commits and revert losers with normal revert commits so the full search history stays visible.
 - If resuming, point `--resume_from` at `output_dir/checkpoints/final.pt` or `latest.pt`.
 
 ## Useful Commands

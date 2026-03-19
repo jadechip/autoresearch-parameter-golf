@@ -21,6 +21,13 @@ At the start of a session, inspect:
 
 Use git history as the experiment memory for what has already been tried and what has already won.
 
+Accepted-state policy:
+
+- Treat the current branch tip as the accepted code state.
+- Treat recent git history as the canonical memory of accepted and rejected experiments.
+- Treat `runs/autoresearch_5090/index/best.json` as numeric telemetry only. It may reflect a reverted run.
+- Do not let `best.json` override the accepted branch state on its own.
+
 ## What You May Edit
 
 - Edit `train.py`.
@@ -143,11 +150,13 @@ Avoid spending time on:
 
 Git discipline:
 
-- If a run is a meaningful winner, commit the `train.py` change to the autoresearch branch.
-- Include the run id and resulting `val_bpb` in the commit message.
-- If a run loses or fails, return the working tree to the previous good state before trying the next idea.
+- Before each run, commit the exact `train.py` experiment to the autoresearch branch.
+- If a run is a meaningful winner, keep that experiment commit as part of the accepted branch history.
+- If a run loses or fails, preserve the failed attempt in history and return to the accepted state with a normal revert commit.
+- Include the run id and resulting `val_bpb` in keep/revert commit messages when practical.
+- Do not use `git reset` to erase experiment history during the loop.
 - Do not accumulate multiple speculative edits without a run in between.
-- Treat `best.json` plus recent commits as the authoritative memory of current best state.
+- Treat the current branch tip plus recent commits as the authoritative memory of accepted state.
 
 Among candidates with similar `val_bpb`, prefer:
 
