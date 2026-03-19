@@ -14,11 +14,28 @@ RUN_ID="${RUN_ID:-ar5090-$(date -u +%Y%m%d-%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUNS_DIR/$RUN_ID}"
 LOCK_DIR="$AUTORESEARCH_ROOT/.lock"
 ACTIVE_JSON="$INDEX_DIR/active.json"
+STATE_DIR="${STATE_DIR:-$ROOT_DIR/.autoresearch}"
+SESSION_JSON="$STATE_DIR/session.json"
+ALLOW_UNINITIALIZED_SESSION="${ALLOW_UNINITIALIZED_SESSION:-0}"
 
 mkdir -p "$RUNS_DIR" "$INDEX_DIR"
 
 if [[ -e "$OUTPUT_DIR" ]]; then
   echo "Output directory already exists: $OUTPUT_DIR" >&2
+  exit 2
+fi
+
+USE_SESSION_STATE=0
+if [[ -f "$SESSION_JSON" ]]; then
+  uv run python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" require-ready >/dev/null
+  USE_SESSION_STATE=1
+elif [[ "$ALLOW_UNINITIALIZED_SESSION" == "1" || "$RUN_ID" == baseline_* ]]; then
+  echo "No autoresearch session found at $SESSION_JSON; allowing baseline/manual run." >&2
+  echo "After the baseline, run: bash scripts/init_autoresearch_session.sh" >&2
+else
+  echo "No autoresearch session found at $SESSION_JSON" >&2
+  echo "Run a baseline first (for example RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh)," >&2
+  echo "then initialize session state with: bash scripts/init_autoresearch_session.sh" >&2
   exit 2
 fi
 
@@ -28,6 +45,9 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 
 cleanup() {
+  if [[ "$USE_SESSION_STATE" == "1" && ! -f "$OUTPUT_DIR/results.json" ]]; then
+    uv run python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "wrapper_cleanup" >/dev/null 2>&1 || true
+  fi
   rm -f "$ACTIVE_JSON"
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
@@ -52,6 +72,18 @@ cat > "$ACTIVE_JSON" <<EOF
 }
 EOF
 
+if [[ "$USE_SESSION_STATE" == "1" ]]; then
+  uv run python "$ROOT_DIR/scripts/autoresearch_state.py" \
+    --state_dir "$STATE_DIR" \
+    start-run \
+    --run_id "$RUN_ID" \
+    --output_dir "$OUTPUT_DIR" \
+    --results_path "$OUTPUT_DIR/results.json" \
+    --metrics_path "$OUTPUT_DIR/metrics.jsonl" \
+    --tensorboard_log_dir "$OUTPUT_DIR/tensorboard" \
+    --crash_path "$OUTPUT_DIR/crash.json" >/dev/null
+fi
+
 set +e
 CONFIG_JSON="$CONFIG_JSON" \
 OUTPUT_DIR="$OUTPUT_DIR" \
@@ -64,6 +96,11 @@ set -e
 RESULTS_JSON="$OUTPUT_DIR/results.json"
 if [[ -f "$RESULTS_JSON" ]]; then
   uv run python "$ROOT_DIR/scripts/index_autoresearch_run.py" "$RESULTS_JSON" --index_dir "$INDEX_DIR"
+  if [[ "$USE_SESSION_STATE" == "1" ]]; then
+    uv run python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" finish-run --results_json "$RESULTS_JSON" >/dev/null
+  fi
+elif [[ "$USE_SESSION_STATE" == "1" ]]; then
+  uv run python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "missing_results_json" >/dev/null
 fi
 
 if [[ $status -ne 0 ]]; then
@@ -74,5 +111,8 @@ echo "Autoresearch experiment finished"
 echo "Run results: $RESULTS_JSON"
 echo "Run metrics: $OUTPUT_DIR/metrics.jsonl"
 echo "TensorBoard logdir: $OUTPUT_DIR/tensorboard"
+if [[ "$USE_SESSION_STATE" == "1" ]]; then
+  echo "Autoresearch session: $SESSION_JSON"
+fi
 echo "Latest index: $INDEX_DIR/latest.json"
 echo "Best index: $INDEX_DIR/best.json"

@@ -17,6 +17,7 @@ At the start of a session, inspect:
 - current git branch
 - if needed, create a dedicated autoresearch branch for the session
 - recent git history on that autoresearch branch
+- `.autoresearch/session.json`
 - `runs/autoresearch_5090/index/best.json`
 
 Use git history as the experiment memory for what has already been tried and what has already won.
@@ -27,6 +28,7 @@ Accepted-state policy:
 - Treat recent git history as the canonical memory of accepted and rejected experiments.
 - Treat `runs/autoresearch_5090/index/best.json` as numeric telemetry only. It may reflect a reverted run.
 - Do not let `best.json` override the accepted branch state on its own.
+- Treat `.autoresearch/session.json` as the readiness gate. If it is missing or not `ready`, do not start the loop.
 
 ## What You May Edit
 
@@ -49,12 +51,16 @@ Use structured files instead:
 - `output_dir/submission_bundle/manifest.json`
 - `runs/autoresearch_5090/index/latest.json`
 - `runs/autoresearch_5090/index/best.json`
+- `.autoresearch/session.json`
+- `.autoresearch/experiments.jsonl`
 
 ## Files That Should Usually Stay Fixed
 
 - `prepare.py`
 - `validate_results.py`
 - `summarize_artifact.py`
+- `scripts/autoresearch_state.py`
+- `scripts/init_autoresearch_session.sh`
 - `scripts/run_autoresearch_experiment.sh`
 - `scripts/index_autoresearch_run.py`
 - `program.md`
@@ -157,6 +163,8 @@ Git discipline:
 - Do not use `git reset` to erase experiment history during the loop.
 - Do not accumulate multiple speculative edits without a run in between.
 - Treat the current branch tip plus recent commits as the authoritative memory of accepted state.
+- After each keep/revert decision, update `.autoresearch/session.json` with:
+  `uv run python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
 
 Among candidates with similar `val_bpb`, prefer:
 

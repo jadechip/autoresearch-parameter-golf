@@ -36,7 +36,21 @@ TRAIN_SHARDS=80 bash scripts/download_official_fineweb.sh
 RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh
 ```
 
-Optional live monitor in a second terminal:
+4. Initialize the lightweight Ralph-style session state:
+
+```bash
+bash scripts/init_autoresearch_session.sh
+```
+
+This creates:
+
+- `./.autoresearch/session.json`
+- `./.autoresearch/experiments.jsonl`
+- `./.autoresearch/notes.md`
+
+Once initialized, non-baseline autoresearch runs will refuse to start unless `session.json` is in `ready` state.
+
+5. Optional live monitor in a second terminal:
 
 ```bash
 bash scripts/run_tensorboard_autoresearch.sh
@@ -50,7 +64,7 @@ ssh -L 6006:127.0.0.1:6006 <user>@<host>
 
 Then open the forwarded TensorBoard URL locally.
 
-4. Start Codex in the repo root.
+6. Start Codex in the repo root.
 
 Recommended command on a dedicated remote box you control:
 
@@ -69,6 +83,8 @@ Codex should create and manage its own dedicated autoresearch branch for the ses
 - the concrete run directory referenced by those index files
 - `./runs/autoresearch_5090/results.tsv`
 - `./runs/autoresearch_5090/runs/<run_id>/metrics.jsonl`
+- `./.autoresearch/session.json`
+- `./.autoresearch/experiments.jsonl`
 
 6. Promote only clear 5090 winners to H100 and then 8xH100 rehearsal runs.
 
@@ -84,6 +100,8 @@ Codex should create and manage its own dedicated autoresearch branch for the ses
 - Use git history as experiment memory.
 - Commit every experiment attempt before running it.
 - Keep winners as normal commits and revert losers with normal revert commits so the full search history stays visible.
+- Use `.autoresearch/session.json` as the readiness gate before starting new experiments.
+- Use `.autoresearch/experiments.jsonl` as append-only local experiment telemetry.
 - If resuming, point `--resume_from` at `output_dir/checkpoints/final.pt` or `latest.pt`.
 
 ## Useful Commands

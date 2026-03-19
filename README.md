@@ -46,7 +46,21 @@ This creates:
 - `./runs/autoresearch_5090/index/best.json`
 - `./runs/autoresearch_5090/results.tsv`
 
-### 4. Watch Progress With TensorBoard In Another Terminal
+### 4. Initialize The Autoresearch Session Gate
+
+```bash
+bash scripts/init_autoresearch_session.sh
+```
+
+This creates a lightweight Ralph-style state directory at:
+
+- `./.autoresearch/session.json`
+- `./.autoresearch/experiments.jsonl`
+- `./.autoresearch/notes.md`
+
+Once that file exists, non-baseline autoresearch runs are gated on `session.json` being in `ready` state. This prevents Codex from starting prematurely against an uninitialized repo.
+
+### 5. Watch Progress With TensorBoard In Another Terminal
 
 ```bash
 bash scripts/run_tensorboard_autoresearch.sh
@@ -116,6 +130,7 @@ cd /workspace/autoresearch-parameter-golf
 bash scripts/bootstrap.sh
 TRAIN_SHARDS=80 bash scripts/download_official_fineweb.sh
 RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh
+bash scripts/init_autoresearch_session.sh
 ```
 
 Then in one terminal:
@@ -148,8 +163,11 @@ Codex should use structured files, not logs:
 - `./runs/autoresearch_5090/index/best.json`
 - `./runs/autoresearch_5090/results.tsv`
 - `./runs/autoresearch_5090/runs/<run_id>/metrics.jsonl`
+- `./.autoresearch/session.json`
+- `./.autoresearch/experiments.jsonl`
 
 `latest.json` is the current run/result pointer. `best.json` is the standing best candidate.
+`.autoresearch/session.json` is the readiness gate and accepted-state ledger.
 
 The recommended live monitor is TensorBoard:
 
@@ -188,6 +206,8 @@ This repo exists as an ongoing experiment setup:
 - `program.md`: agent contract
 - `CODEX_AUTORESEARCH_PROMPT.md`: copy/paste Codex prompt
 - `AUTORESEARCH_SETUP.md`: longer setup notes
+- `scripts/autoresearch_state.py`: lightweight Ralph-style session state helper
+- `scripts/init_autoresearch_session.sh`: creates `.autoresearch/session.json`
 - `scripts/run_autoresearch_experiment.sh`: one fixed-budget autoresearch run
 - `scripts/runpod_5090_train.sh`: manual single-GPU training wrapper
 
@@ -224,6 +244,7 @@ Useful helpers:
 
 ```bash
 make autoresearch-baseline
+make init-autoresearch-session
 make tensorboard-autoresearch
 make compare-autoresearch
 ```

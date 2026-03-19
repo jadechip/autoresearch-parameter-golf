@@ -19,6 +19,14 @@ import compare_runs
 import train as mod
 import watch_run
 
+_AUTORESEARCH_STATE_SPEC = importlib.util.spec_from_file_location(
+    "autoresearch_state",
+    Path(__file__).parent / "scripts" / "autoresearch_state.py",
+)
+assert _AUTORESEARCH_STATE_SPEC is not None and _AUTORESEARCH_STATE_SPEC.loader is not None
+autoresearch_state = importlib.util.module_from_spec(_AUTORESEARCH_STATE_SPEC)
+_AUTORESEARCH_STATE_SPEC.loader.exec_module(autoresearch_state)
+
 
 class FakeTokenizer:
     def __init__(self, vocab_size: int = 6):
@@ -119,6 +127,45 @@ def assert_state_dict_equal(lhs: dict, rhs: dict) -> None:
             assert torch.equal(left, right), key
         else:
             assert left == right, key
+
+
+def write_fake_results(path: Path, *, run_id: str, val_bpb: float, status: str = "success") -> Path:
+    run_dir = path.parent
+    payload = {
+        "schema_version": mod.RESULTS_SCHEMA_VERSION,
+        "status": status,
+        "mode": "train",
+        "run_id": run_id,
+        "config_hash": f"hash-{run_id}",
+        "output_dir": str(run_dir),
+        "results_path": str(path),
+        "config_path": str(run_dir / "config.json"),
+        "started_at_unix": 0.0,
+        "finished_at_unix": 1.0,
+        "training_seconds": 1.0,
+        "total_seconds": 1.0,
+        "peak_vram_mb": 0.0,
+        "mfu_percent": 0.0,
+        "total_tokens": 1,
+        "total_tokens_M": 0.000001,
+        "num_steps": 1,
+        "num_params": 1,
+        "num_params_M": 0.000001,
+        "depth": 1,
+        "train_loss": 1.0,
+        "val_loss": 1.0,
+        "val_bpb": val_bpb,
+        "artifact_bytes": 1,
+        "artifact": None,
+        "benchmark": None,
+        "checkpoint_path": None,
+        "metrics_path": str(run_dir / "metrics.jsonl"),
+        "tensorboard_log_dir": str(run_dir / "tensorboard"),
+        "resume_from": None,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
 
 
 def test_config_roundtrip_json_dataclass_json(tmp_path: Path) -> None:
@@ -593,41 +640,8 @@ def test_autoresearch_index_script_updates_latest_and_best(tmp_path: Path) -> No
     index_dir = tmp_path / "index"
 
     def write_results(run_name: str, val_bpb: float, *, status: str = "success") -> Path:
-        run_dir = tmp_path / run_name
-        run_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "schema_version": mod.RESULTS_SCHEMA_VERSION,
-            "status": status,
-            "mode": "train",
-            "run_id": run_name,
-            "config_hash": f"hash-{run_name}",
-            "output_dir": str(run_dir),
-            "results_path": str(run_dir / "results.json"),
-            "config_path": str(run_dir / "config.json"),
-            "started_at_unix": 0.0,
-            "finished_at_unix": 1.0,
-            "training_seconds": 1.0,
-            "total_seconds": 1.0,
-            "peak_vram_mb": 0.0,
-            "mfu_percent": 0.0,
-            "total_tokens": 1,
-            "total_tokens_M": 0.000001,
-            "num_steps": 1,
-            "num_params": 1,
-            "num_params_M": 0.000001,
-            "depth": 1,
-            "train_loss": 1.0,
-            "val_loss": 1.0,
-            "val_bpb": val_bpb,
-            "artifact_bytes": 1,
-            "artifact": None,
-            "benchmark": None,
-            "checkpoint_path": None,
-            "resume_from": None,
-        }
-        results_path = run_dir / "results.json"
-        results_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return results_path
+        results_path = tmp_path / run_name / "results.json"
+        return write_fake_results(results_path, run_id=run_name, val_bpb=val_bpb, status=status)
 
     first = write_results("run_a", 1.50)
     second = write_results("run_b", 1.40)
@@ -650,6 +664,64 @@ def test_autoresearch_index_script_updates_latest_and_best(tmp_path: Path) -> No
     assert latest["run_id"] == "run_b"
     assert best["run_id"] == "run_b"
     assert float(best["val_bpb"]) == 1.40
+
+
+def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".autoresearch"
+    baseline_results = write_fake_results(tmp_path / "baseline" / "results.json", run_id="baseline", val_bpb=1.80)
+    session = autoresearch_state.init_session(state_dir, baseline_results)
+    assert session["status"] == "ready"
+    assert session["accepted_run_id"] == "baseline"
+    assert (state_dir / "notes.md").is_file()
+
+    started = autoresearch_state.start_run(
+        state_dir,
+        run_id="trial_a",
+        output_dir=str(tmp_path / "trial_a"),
+        results_path_value=str(tmp_path / "trial_a" / "results.json"),
+        metrics_path=str(tmp_path / "trial_a" / "metrics.jsonl"),
+        tensorboard_log_dir=str(tmp_path / "trial_a" / "tensorboard"),
+        crash_path=str(tmp_path / "trial_a" / "crash.json"),
+    )
+    assert started["status"] == "running"
+    assert started["current_experiment"]["run_id"] == "trial_a"
+
+    trial_results = write_fake_results(tmp_path / "trial_a" / "results.json", run_id="trial_a", val_bpb=1.75)
+    finished = autoresearch_state.finish_run(state_dir, trial_results)
+    assert finished["status"] == "ready"
+    assert finished["latest_run_id"] == "trial_a"
+    assert finished["latest_val_bpb"] == 1.75
+
+    decided = autoresearch_state.decide_run(state_dir, "trial_a", "accepted", trial_results)
+    assert decided["accepted_run_id"] == "trial_a"
+    assert decided["accepted_val_bpb"] == 1.75
+
+    events = [
+        json.loads(line)
+        for line in (state_dir / "experiments.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(event["event"] == "baseline_init" for event in events)
+    assert any(event["event"] == "run_start" and event["run_id"] == "trial_a" for event in events)
+    assert any(event["event"] == "run_result" and event["run_id"] == "trial_a" for event in events)
+    assert any(event["event"] == "decision" and event["decision"] == "accepted" for event in events)
+
+
+def test_run_autoresearch_experiment_requires_initialized_session(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["AUTORESEARCH_ROOT"] = str(tmp_path / "runs")
+    env["STATE_DIR"] = str(tmp_path / ".autoresearch")
+    env["RUN_ID"] = "ar5090-test"
+    proc = subprocess.run(
+        ["bash", "scripts/run_autoresearch_experiment.sh"],
+        cwd=Path(__file__).parent,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 2
+    assert "No autoresearch session found" in proc.stderr
 
 
 @pytest.mark.cuda

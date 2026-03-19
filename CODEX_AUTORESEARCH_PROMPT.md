@@ -5,10 +5,12 @@ Use this as the bootstrap prompt for a Codex session running inside this repo on
 Recommended human launch flow:
 
 1. `cd /workspace/autoresearch-parameter-golf`
-2. start Codex in the repo root with:
+2. make sure the lightweight session gate exists:
+   `bash scripts/init_autoresearch_session.sh`
+3. start Codex in the repo root with:
    `codex --dangerously-bypass-approvals-and-sandbox`
    Only do this on a dedicated remote box you control for these experiments.
-3. paste the prompt below
+4. paste the prompt below
 
 ```text
 Read program.md and AUTORESEARCH_SETUP.md first.
@@ -19,6 +21,7 @@ Before doing anything else:
 - inspect the current git branch
 - if you are not already on a dedicated autoresearch branch, create one yourself with a timestamped name like autoresearch/20260319-153000
 - inspect recent commits on that branch
+- inspect .autoresearch/session.json and do not start experimenting unless it exists and status=ready
 - inspect runs/autoresearch_5090/index/best.json
 
 Git policy for this session:
@@ -31,6 +34,8 @@ Git policy for this session:
 Current control files:
 - runs/autoresearch_5090/index/latest.json
 - runs/autoresearch_5090/index/best.json
+- .autoresearch/session.json
+- .autoresearch/experiments.jsonl
 
 Before making a new change:
 - inspect the current best.json again if needed
@@ -60,6 +65,8 @@ Rules:
 - If a run is worse or not meaningfully better, add a revert commit and move on.
 - If a run is a meaningful winner, keep the experiment commit as part of the accepted branch history.
 - Include the run id and val_bpb in the post-run keep/revert commit message when possible.
+- After each keep/revert decision, update the Ralph-style state file with:
+  `uv run python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
 - Use recent git history as memory so you do not repeat the same weak ideas.
 - Keep one experiment per code change.
 - Keep the branch tip equal to the current accepted candidate.
@@ -68,10 +75,11 @@ Rules:
 
 Expected command loop inside Codex:
 
-1. inspect branch tip, recent commits, and `runs/autoresearch_5090/index/best.json`
+1. inspect branch tip, `.autoresearch/session.json`, recent commits, and `runs/autoresearch_5090/index/best.json`
 2. edit `train.py`
 3. commit the experiment
 4. run `bash scripts/run_autoresearch_experiment.sh`
 5. inspect `latest.json`, `best.json`, and the concrete run outputs
 6. keep the commit if it wins, otherwise add a revert commit
-7. continue
+7. record the decision in `.autoresearch/session.json`
+8. continue
