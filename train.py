@@ -350,16 +350,6 @@ def expand_adapter_capacity(model_cfg: ModelConfig) -> None:
     model_cfg.adapter_targets = ALLOWED_ADAPTER_TARGETS
 
 
-def widen_d_model_on_balanced_4x2_layout(model_cfg: ModelConfig) -> None:
-    if model_cfg.d_model != 512 or model_cfg.num_heads != 8 or model_cfg.num_kv_heads != 4:
-        return
-    if model_cfg.shared_layers != 4 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 1:
-        return
-    if model_cfg.adapter_rank != 8 or set(model_cfg.adapter_targets) != set(ALLOWED_ADAPTER_TARGETS):
-        return
-    model_cfg.d_model = 576
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2936,7 +2926,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         cfg.evaluate_only = True
     rebalance_shared_layers_vs_loops(cfg.model)
     expand_adapter_capacity(cfg.model)
-    widen_d_model_on_balanced_4x2_layout(cfg.model)
     return cfg
 
 
