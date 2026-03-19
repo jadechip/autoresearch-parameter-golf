@@ -1206,9 +1206,9 @@ class GroupedQueryAttention(nn.Module):
 
 
 class ReLU2MLP(nn.Module):
-    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0):
+    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0, hidden_bonus: int = 0):
         super().__init__()
-        hidden = cfg.d_model * cfg.mlp_mult
+        hidden = cfg.d_model * cfg.mlp_mult + hidden_bonus
         self.fc = FakeQuantLinear(
             cfg.d_model,
             hidden,
@@ -1243,12 +1243,12 @@ class ReLU2MLP(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0):
+    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0, mlp_hidden_bonus: int = 0):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
         self.mlp_norm = RMSNorm(cfg.d_model)
         self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots)
-        self.mlp = ReLU2MLP(cfg, num_adapter_slots=num_adapter_slots)
+        self.mlp = ReLU2MLP(cfg, num_adapter_slots=num_adapter_slots, hidden_bonus=mlp_hidden_bonus)
         scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
@@ -1274,13 +1274,18 @@ class RecurrentGPT(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
+        non_recurrent_hidden_bonus = cfg.d_model // 2
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
-        self.stem = nn.ModuleList([TransformerBlock(cfg, num_adapter_slots=0) for _ in range(cfg.stem_layers)])
+        self.stem = nn.ModuleList(
+            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.stem_layers)]
+        )
         self.shared = nn.ModuleList(
             [TransformerBlock(cfg, num_adapter_slots=cfg.recurrence_loops) for _ in range(cfg.shared_layers)]
         )
-        self.tail = nn.ModuleList([TransformerBlock(cfg, num_adapter_slots=0) for _ in range(cfg.tail_layers)])
+        self.tail = nn.ModuleList(
+            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.tail_layers)]
+        )
         self.final_norm = RMSNorm(cfg.d_model)
         self.lm_head = None if cfg.tie_embeddings else FakeQuantLinear(
             cfg.d_model,
