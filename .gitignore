@@ -1,0 +1,26 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local virtual environments
+.venv/
+venv/
+
+# Local datasets and smoke-test outputs
+data/
+smoke_data/
+
+# Training and experiment outputs
+runs/
+out*/
+sample_outputs/tmp/
+
+# OS/editor noise
+.DS_Store

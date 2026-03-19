@@ -1,0 +1,1 @@
+run_id	config_hash	status	mode	val_bpb	training_seconds	total_seconds	peak_vram_mb	mfu_percent	total_tokens_M	num_steps	num_params_M	depth	artifact_bytes	output_dir	results_path

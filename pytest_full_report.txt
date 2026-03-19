@@ -1,0 +1,18 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.5, pytest-9.0.2, pluggy-1.6.0 -- /opt/pyvenv/bin/python
+cachedir: .pytest_cache
+metadata: {'Python': '3.13.5', 'Platform': 'Linux-4.4.0-x86_64-with-glibc2.41', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'asyncio': '1.3.0', 'json-report': '1.5.0', 'cov': '7.0.0', 'anyio': '4.12.1', 'metadata': '3.1.1', 'ddtrace': '4.4.0', 'Faker': '40.1.2'}, 'PLATFORM': 'linux/amd64', 'CI': 'true'}
+rootdir: /mnt/data/pgolf_recurrent_qat
+plugins: asyncio-1.3.0, json-report-1.5.0, cov-7.0.0, anyio-4.12.1, metadata-3.1.1, ddtrace-4.4.0, Faker-40.1.2
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 9 items
+
+test_train_pgolf_recurrent_qat.py::test_write_and_load_shard_roundtrip PASSED [ 11%]
+test_train_pgolf_recurrent_qat.py::test_token_stream_wraps_across_files PASSED [ 22%]
+test_train_pgolf_recurrent_qat.py::test_build_piece_byte_luts_fake_tokenizer PASSED [ 33%]
+test_train_pgolf_recurrent_qat.py::test_rope_and_attention_shapes PASSED [ 44%]
+test_train_pgolf_recurrent_qat.py::test_fake_quant_linear_adapter_slot_changes_output PASSED [ 55%]
+test_train_pgolf_recurrent_qat.py::test_model_forward_and_loss_finite PASSED [ 66%]
+test_train_pgolf_recurrent_qat.py::test_quantization_pack_roundtrip PASSED [ 77%]
+test_train_pgolf_recurrent_qat.py::test_training_step_decreases_loss_on_easy_sequence PASSED [ 88%]
+test_train_pgolf_recurrent_qat.py::test_full_smoke_train_and_export 

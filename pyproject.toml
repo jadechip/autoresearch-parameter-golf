@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pgolf-recurrent-qat"
+version = "0.1.0"
+description = "Depth-recurrent QAT baseline for OpenAI Parameter Golf."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "numpy==2.3.3",
+  "torch==2.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.0.2",
+]
+tokenizer = [
+  "sentencepiece==0.2.1",
+]
+
+[tool.setuptools]
+py-modules = [
+  "train",
+  "prepare",
+  "validate_results",
+  "summarize_artifact",
+  "train_pgolf_recurrent_qat",
+]
+
+[tool.pytest.ini_options]
+markers = [
+  "cuda: requires CUDA",
+  "ddp: requires torch distributed smoke environment",
+  "compile_smoke: requires torch.compile support",
+  "sentencepiece_real: requires a real SentencePiece model file",
+]
