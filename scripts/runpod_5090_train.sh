@@ -64,3 +64,4 @@ fi
 echo "Training finished"
 echo "Results: $OUTPUT_DIR/results.json"
 echo "Metrics: $OUTPUT_DIR/metrics.jsonl"
+echo "TensorBoard logdir: $OUTPUT_DIR/tensorboard"

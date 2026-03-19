@@ -26,6 +26,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.tensorboard import SummaryWriter
 
 
 # ============================================================================
@@ -48,6 +49,7 @@ HASH_EXCLUDED_KEYS = {
     "output_dir",
     "results_tsv_path",
     "metrics_jsonl_path",
+    "tensorboard_log_dir",
     "run_name",
     "resume_from",
     "load_artifact_path",
@@ -151,6 +153,7 @@ class TrainConfig:
     run_name: str | None = None
     results_tsv_path: str = "./results.tsv"
     metrics_jsonl_path: str | None = None
+    tensorboard_log_dir: str | None = None
     seed: int = 1337
     deterministic: bool = True
     iterations: int = 20_000
@@ -237,6 +240,7 @@ class RunSummary:
     effective_depth: int
     checkpoint_path: str | None
     metrics_path: str | None
+    tensorboard_log_dir: str | None
     results_path: str | None
 
 
@@ -391,6 +395,10 @@ def resolve_metrics_jsonl_path(output_dir: Path, configured_path: str | None) ->
     return resolve_run_output_path(output_dir, configured_path, "metrics.jsonl")
 
 
+def resolve_tensorboard_log_dir(output_dir: Path, configured_path: str | None) -> Path:
+    return resolve_run_output_path(output_dir, configured_path, "tensorboard")
+
+
 def current_optimizer_lr(opt: torch.optim.Optimizer | None) -> float | None:
     if opt is None or not opt.param_groups:
         return None
@@ -404,6 +412,94 @@ def append_metrics_event(path: str | Path, payload: Mapping[str, Any]) -> Path:
         **payload,
     }
     return append_jsonl(path, event)
+
+
+def tb_step(step: int) -> int:
+    return max(0, int(step))
+
+
+def tb_add_scalar(writer: SummaryWriter | None, tag: str, value: float | int | None, step: int) -> None:
+    if writer is None or value is None:
+        return
+    writer.add_scalar(tag, float(value), tb_step(step))
+
+
+def tb_log_run_start(
+    writer: SummaryWriter | None,
+    *,
+    run_id: str,
+    mode: str,
+    cfg_hash: str,
+    cfg: TrainConfig,
+    output_dir: Path,
+) -> None:
+    if writer is None:
+        return
+    writer.add_text("run/id", run_id, 0)
+    writer.add_text("run/mode", mode, 0)
+    writer.add_text("run/config_hash", cfg_hash, 0)
+    writer.add_text("run/output_dir", str(output_dir), 0)
+    writer.add_text("run/config_json", json.dumps(config_to_dict(cfg), indent=2, sort_keys=True), 0)
+    writer.add_scalar("model/effective_depth", cfg.model.effective_depth, 0)
+    writer.add_scalar("budget/max_wallclock_seconds", cfg.max_wallclock_seconds, 0)
+
+
+def tb_log_train_event(
+    writer: SummaryWriter | None,
+    *,
+    step: int,
+    train_loss: float | None,
+    step_seconds: float | None,
+    elapsed_training_seconds: float,
+    total_tokens: int,
+    total_tokens_M: float,
+    lr_scale_value: float,
+    lr_now: Mapping[str, float | None],
+) -> None:
+    if writer is None:
+        return
+    tb_add_scalar(writer, "loss/train", train_loss, step)
+    tb_add_scalar(writer, "perf/step_seconds", step_seconds, step)
+    tb_add_scalar(writer, "perf/training_seconds", elapsed_training_seconds, step)
+    tb_add_scalar(writer, "perf/total_tokens", total_tokens, step)
+    tb_add_scalar(writer, "perf/total_tokens_M", total_tokens_M, step)
+    tb_add_scalar(writer, "perf/tokens_per_second", total_tokens / max(elapsed_training_seconds, 1e-9), step)
+    tb_add_scalar(writer, "lr/scale", lr_scale_value, step)
+    for name, value in lr_now.items():
+        tb_add_scalar(writer, f"lr/{name.removesuffix('_lr')}", value, step)
+
+
+def tb_log_val_event(writer: SummaryWriter | None, *, phase: str, step: int, stats: EvalStats) -> None:
+    if writer is None:
+        return
+    tb_add_scalar(writer, "loss/val", stats.val_loss, step)
+    tb_add_scalar(writer, f"loss/val_{phase}", stats.val_loss, step)
+    if stats.val_bpb is not None:
+        tb_add_scalar(writer, "quality/val_bpb", stats.val_bpb, step)
+        tb_add_scalar(writer, f"quality/val_bpb_{phase}", stats.val_bpb, step)
+    tb_add_scalar(writer, "perf/eval_seconds", stats.eval_seconds, step)
+    tb_add_scalar(writer, f"perf/eval_seconds_{phase}", stats.eval_seconds, step)
+
+
+def tb_log_summary(
+    writer: SummaryWriter | None,
+    *,
+    step: int,
+    summary: RunSummary,
+) -> None:
+    if writer is None:
+        return
+    tb_add_scalar(writer, "summary/training_seconds", summary.training_seconds, step)
+    tb_add_scalar(writer, "summary/total_seconds", summary.total_seconds, step)
+    tb_add_scalar(writer, "summary/peak_vram_mb", summary.peak_vram_mb, step)
+    tb_add_scalar(writer, "summary/total_tokens_M", summary.total_tokens_M, step)
+    tb_add_scalar(writer, "summary/num_params_M", summary.num_params_M, step)
+    tb_add_scalar(writer, "summary/depth", summary.effective_depth, step)
+    tb_add_scalar(writer, "summary/val_bpb", summary.val_bpb, step)
+    if summary.export is not None:
+        tb_add_scalar(writer, "artifact/bytes", summary.export.artifact_bytes, step)
+        tb_add_scalar(writer, "artifact/compressed_model_bytes", summary.export.compressed_model_bytes, step)
+        tb_add_scalar(writer, "artifact/code_bytes", summary.export.code_bytes, step)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -502,6 +598,8 @@ def validate_results_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         )
     if payload["status"] not in {"success", "failed"}:
         raise ResultsSchemaError(f"unsupported results status: {payload['status']}")
+    if "tensorboard_log_dir" in payload and not isinstance(payload["tensorboard_log_dir"], (str, type(None))):
+        raise ResultsSchemaError(f"results.json key 'tensorboard_log_dir' has invalid type: {type(payload['tensorboard_log_dir']).__name__}")
     return payload
 
 
@@ -1879,6 +1977,7 @@ def summary_to_results(summary: RunSummary, cfg: TrainConfig, output_dir: Path, 
         "benchmark": None if summary.benchmark is None else dataclasses.asdict(summary.benchmark),
         "checkpoint_path": summary.checkpoint_path,
         "metrics_path": summary.metrics_path,
+        "tensorboard_log_dir": summary.tensorboard_log_dir,
         "resume_from": cfg.resume_from,
     }
     return dict(validate_results_payload(payload))
@@ -1896,6 +1995,7 @@ def write_failure_outputs(
     output_dir.mkdir(parents=True, exist_ok=True)
     finished_at = time.time()
     metrics_path = resolve_metrics_jsonl_path(output_dir, cfg.metrics_jsonl_path)
+    tensorboard_log_dir = resolve_tensorboard_log_dir(output_dir, cfg.tensorboard_log_dir)
     crash_payload = {
         "run_id": run_id,
         "config_hash": cfg_hash,
@@ -1948,6 +2048,7 @@ def write_failure_outputs(
         "benchmark": None,
         "checkpoint_path": None,
         "metrics_path": str(metrics_path),
+        "tensorboard_log_dir": str(tensorboard_log_dir),
         "resume_from": cfg.resume_from,
         "crash_path": str(crash_path),
         "exit_code": exit_code,
@@ -2043,9 +2144,11 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
     output_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(output_dir / "config.json", config_to_dict(cfg))
     metrics_path = resolve_metrics_jsonl_path(output_dir, cfg.metrics_jsonl_path)
+    tensorboard_log_dir = resolve_tensorboard_log_dir(output_dir, cfg.tensorboard_log_dir)
 
     dist_info = init_distributed()
     session_summary: RunSummary | None = None
+    writer: SummaryWriter | None = None
     try:
         device = get_device(dist_info)
         rank0 = dist_info.rank == 0
@@ -2073,6 +2176,21 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
             cfg_hash = resume_state.config_hash
 
         if rank0:
+            writer = SummaryWriter(
+                log_dir=str(tensorboard_log_dir),
+                purge_step=None if resume_state is None else resume_state.next_step,
+                flush_secs=5,
+            )
+            tb_log_run_start(
+                writer,
+                run_id=run_id,
+                mode="benchmark" if cfg.benchmark_only else "train",
+                cfg_hash=cfg_hash,
+                cfg=cfg,
+                output_dir=output_dir,
+            )
+
+        if rank0:
             append_metrics_event(
                 metrics_path,
                 {
@@ -2082,6 +2200,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     "config_hash": cfg_hash,
                     "output_dir": str(output_dir),
                     "metrics_path": str(metrics_path),
+                    "tensorboard_log_dir": str(tensorboard_log_dir),
                     "resume_from": cfg.resume_from,
                     "effective_depth": cfg.model.effective_depth,
                     "max_wallclock_seconds": cfg.max_wallclock_seconds,
@@ -2172,6 +2291,17 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                         **lr_now,
                     },
                 )
+                tb_log_train_event(
+                    writer,
+                    step=step,
+                    train_loss=last_train_loss,
+                    step_seconds=step_seconds,
+                    elapsed_training_seconds=training_elapsed_prior + (time.time() - training_start),
+                    total_tokens=total_tokens,
+                    total_tokens_M=total_tokens / 1e6,
+                    lr_scale_value=lr_scale(step, target_iterations, cfg.optim),
+                    lr_now=lr_now,
+                )
 
             if val_tokens is not None and should_run_validation(step, target_iterations, cfg.val_every, cfg.eval_first_step):
                 barrier_if_needed()
@@ -2208,6 +2338,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                             "eval_seconds": last_val.eval_seconds,
                         },
                     )
+                    tb_log_val_event(writer, phase="periodic", step=step, stats=last_val)
 
             if rank0 and cfg.checkpoint_every > 0 and completed_steps % cfg.checkpoint_every == 0:
                 save_checkpoint(
@@ -2261,6 +2392,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                         "eval_seconds": last_val.eval_seconds,
                     },
                 )
+                tb_log_val_event(writer, phase="final", step=last_step, stats=last_val)
 
         if lawa is not None and lawa.count > 0:
             lawa.load_into(raw_model)
@@ -2297,6 +2429,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                             "eval_seconds": last_val.eval_seconds,
                         },
                     )
+                    tb_log_val_event(writer, phase="lawa", step=last_step, stats=last_val)
 
         training_seconds = training_elapsed_prior + (time.time() - training_start)
         num_params = count_parameters(raw_model)
@@ -2393,6 +2526,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
             effective_depth=cfg.model.effective_depth,
             checkpoint_path=checkpoint_path,
             metrics_path=str(metrics_path),
+            tensorboard_log_dir=str(tensorboard_log_dir),
             results_path=str(output_dir / "results.json"),
         )
         session_summary.benchmark = benchmark_stats_from_run(session_summary, last_val)
@@ -2420,10 +2554,14 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     "results_path": results_payload["results_path"],
                 },
             )
+            tb_log_summary(writer, step=session_summary.step, summary=session_summary)
+            writer.flush()
             emit_metric_lines(results_payload)
         barrier_if_needed()
         return session_summary
     finally:
+        if writer is not None:
+            writer.close()
         cleanup_distributed()
 
 
@@ -2438,8 +2576,10 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
     output_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(output_dir / "config.json", config_to_dict(cfg))
     metrics_path = resolve_metrics_jsonl_path(output_dir, cfg.metrics_jsonl_path)
+    tensorboard_log_dir = resolve_tensorboard_log_dir(output_dir, cfg.tensorboard_log_dir)
 
     dist_info = init_distributed()
+    writer: SummaryWriter | None = None
     try:
         device = get_device(dist_info)
         rank0 = dist_info.rank == 0
@@ -2447,6 +2587,17 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
         setup_seed(cfg.seed + dist_info.rank, deterministic=cfg.deterministic)
         if device.type == "cuda":
             reset_peak_vram_stats(device)
+
+        if rank0:
+            writer = SummaryWriter(log_dir=str(tensorboard_log_dir), flush_secs=5)
+            tb_log_run_start(
+                writer,
+                run_id=run_id,
+                mode="eval",
+                cfg_hash=cfg_hash,
+                cfg=cfg,
+                output_dir=output_dir,
+            )
 
         if rank0:
             append_metrics_event(
@@ -2458,6 +2609,7 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
                     "config_hash": cfg_hash,
                     "output_dir": str(output_dir),
                     "metrics_path": str(metrics_path),
+                    "tensorboard_log_dir": str(tensorboard_log_dir),
                     "load_artifact_path": cfg.load_artifact_path,
                     "effective_depth": cfg.model.effective_depth,
                 },
@@ -2496,6 +2648,7 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
                     "eval_seconds": val_stats.eval_seconds,
                 },
             )
+            tb_log_val_event(writer, phase="eval", step=-1, stats=val_stats)
         export_stats = ExportStats(
             artifact_dir=str(resolve_artifact_dir(cfg.load_artifact_path)),
             manifest_path=str(resolve_artifact_dir(cfg.load_artifact_path) / "manifest.json"),
@@ -2534,6 +2687,7 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
             effective_depth=model.cfg.effective_depth,
             checkpoint_path=None,
             metrics_path=str(metrics_path),
+            tensorboard_log_dir=str(tensorboard_log_dir),
             results_path=str(output_dir / "results.json"),
         )
         if rank0:
@@ -2559,10 +2713,14 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
                     "results_path": results_payload["results_path"],
                 },
             )
+            tb_log_summary(writer, step=0, summary=summary)
+            writer.flush()
             emit_metric_lines(results_payload)
         barrier_if_needed()
         return summary
     finally:
+        if writer is not None:
+            writer.close()
         cleanup_distributed()
 
 
@@ -2583,6 +2741,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--results_tsv_path", type=str, default=None)
     parser.add_argument("--metrics_jsonl_path", type=str, default=None)
+    parser.add_argument("--tensorboard_log_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--iterations", type=int, default=None)
     parser.add_argument("--train_batch_tokens", type=int, default=None)
@@ -2648,6 +2807,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         "run_name",
         "results_tsv_path",
         "metrics_jsonl_path",
+        "tensorboard_log_dir",
         "seed",
         "iterations",
         "train_batch_tokens",

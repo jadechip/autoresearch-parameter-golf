@@ -39,10 +39,16 @@ RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh
 Optional live monitor in a second terminal:
 
 ```bash
-uv run pgolf-monitor ./runs/autoresearch_5090/index/latest.json
+bash scripts/run_tensorboard_autoresearch.sh
 ```
 
-While the run is active, the monitor should open a full-screen `plotext`-based terminal UI with the current run id, latest train and validation metrics, library-rendered charts for metrics such as loss, LR, bpb, and throughput, a recent-run history section for completed experiments, and a recent-events pane. Press `q` to quit.
+This serves TensorBoard on port `6006` for the whole autoresearch run tree, so you can compare the current run against previous runs. On a remote host, forward the port to your local machine, for example:
+
+```bash
+ssh -L 6006:127.0.0.1:6006 <user>@<host>
+```
+
+Then open the forwarded TensorBoard URL locally.
 
 4. Start Codex in the repo root.
 

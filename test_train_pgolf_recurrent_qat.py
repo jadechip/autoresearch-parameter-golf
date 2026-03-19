@@ -450,6 +450,7 @@ def test_metrics_jsonl_written_for_training_run(tmp_path: Path) -> None:
     cfg.metrics_jsonl_path = "metrics.jsonl"
     mod.train_one_run(cfg)
     metrics_path = Path(cfg.output_dir) / "metrics.jsonl"
+    tensorboard_dir = Path(cfg.output_dir) / "tensorboard"
     events = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert any(event["event"] == "run_start" for event in events)
     assert any(event["event"] == "train" for event in events)
@@ -459,6 +460,8 @@ def test_metrics_jsonl_written_for_training_run(tmp_path: Path) -> None:
     assert train_event["matrix_lr"] > 0.0
     results = json.loads((Path(cfg.output_dir) / "results.json").read_text(encoding="utf-8"))
     assert results["metrics_path"] == str(metrics_path)
+    assert results["tensorboard_log_dir"] == str(tensorboard_dir)
+    assert list(tensorboard_dir.glob("events.out.tfevents.*"))
 
 
 def test_watch_run_script_once(tmp_path: Path) -> None:
@@ -505,6 +508,7 @@ def test_watch_run_script_once(tmp_path: Path) -> None:
                 "benchmark": None,
                 "checkpoint_path": None,
                 "resume_from": None,
+                "tensorboard_log_dir": str(run_dir / "tensorboard"),
             },
             indent=2,
         ),
@@ -561,6 +565,7 @@ def test_watch_run_latest_json_falls_back_to_active_json(tmp_path: Path) -> None
                 "output_dir": str(run_dir),
                 "results_path": str(run_dir / "results.json"),
                 "metrics_path": str(run_dir / "metrics.jsonl"),
+                "tensorboard_log_dir": str(run_dir / "tensorboard"),
                 "crash_path": str(run_dir / "crash.json"),
             }
         ),

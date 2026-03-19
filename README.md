@@ -46,10 +46,10 @@ This creates:
 - `./runs/autoresearch_5090/index/best.json`
 - `./runs/autoresearch_5090/results.tsv`
 
-### 4. Watch The Run In Another Terminal
+### 4. Watch Progress With TensorBoard In Another Terminal
 
 ```bash
-uv run pgolf-monitor ./runs/autoresearch_5090/index/latest.json
+bash scripts/run_tensorboard_autoresearch.sh
 ```
 
 Or compare completed runs:
@@ -58,22 +58,18 @@ Or compare completed runs:
 uv run pgolf-compare-runs --results_tsv ./runs/autoresearch_5090/results.tsv
 ```
 
-While the run is active, the monitor should show a live dashboard with fields like:
-
-- `Run Dir`
-- `Run ID`
-- `Status: running`
-- `Last Train`
-- `Last Val`
-- `plotext`-based terminal charts for `train_loss`, `matrix_lr`, `val_bpb`, and throughput
-- a recent-run history plot so you can see experiment progress across changes
-- a recent-events pane with the latest train/val/summary updates
-
-If your checkout is older and `latest.json` does not exist until the run finishes, point the watcher directly at the run directory instead:
+For a remote host, expose or forward port `6006`, then open TensorBoard in your local browser. A typical SSH tunnel looks like:
 
 ```bash
-uv run pgolf-monitor ./runs/autoresearch_5090/runs/baseline_5090_5min
+ssh -L 6006:127.0.0.1:6006 <user>@<host>
 ```
+
+TensorBoard will show:
+
+- the current run updating in real time
+- previous runs beside it for comparison
+- train loss, validation bpb, learning rates, throughput, and timing
+- per-run grouping from the autoresearch run directory layout
 
 ## Run With Codex
 
@@ -125,7 +121,7 @@ RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh
 Then in one terminal:
 
 ```bash
-uv run pgolf-monitor ./runs/autoresearch_5090/index/latest.json
+bash scripts/run_tensorboard_autoresearch.sh
 ```
 
 And in the Codex terminal:
@@ -155,19 +151,18 @@ Codex should use structured files, not logs:
 
 `latest.json` is the current run/result pointer. `best.json` is the standing best candidate.
 
-The recommended live monitor is:
+The recommended live monitor is TensorBoard:
 
 ```bash
-uv run pgolf-monitor ./runs/autoresearch_5090/index/latest.json
+bash scripts/run_tensorboard_autoresearch.sh
 ```
 
-This opens a full-screen `plotext`-based terminal UI over SSH/tmux with:
+This serves the autoresearch run tree on port `6006` and lets you compare current and previous runs in one place.
 
-- current status and latest metrics
-- live library-rendered charts for loss, bpb, LR, and throughput
-- a recent-run history section for completed experiments
-- a recent-events pane
-- `q` to quit
+Each run writes TensorBoard events under:
+
+- `./runs/autoresearch_5090/runs/<run_id>/tensorboard`
+- `./runs/runpod_5090_single_gpu/tensorboard`
 
 ## Why This Repo Exists
 
@@ -229,8 +224,7 @@ Useful helpers:
 
 ```bash
 make autoresearch-baseline
-make watch-latest
-make monitor-latest
+make tensorboard-autoresearch
 make compare-autoresearch
 ```
 
