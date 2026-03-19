@@ -15,7 +15,7 @@ def load_manifest(path: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize the latest exported artifact and run results.")
-    parser.add_argument("--results_json", type=str, default="./out_pgolf_recurrent_qat/results.json")
+    parser.add_argument("--results_json", type=str, default="./out_autoresearch_parameter_golf/results.json")
     args = parser.parse_args()
 
     results_path = Path(args.results_json)

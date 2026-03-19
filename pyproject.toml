@@ -3,9 +3,9 @@ requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pgolf-recurrent-qat"
+name = "autoresearch-parameter-golf"
 version = "0.1.0"
-description = "Depth-recurrent QAT baseline for OpenAI Parameter Golf."
+description = "Starter kit and autoresearch-ready experimentation harness for OpenAI Parameter Golf."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [

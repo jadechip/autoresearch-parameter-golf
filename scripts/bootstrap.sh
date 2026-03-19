@@ -30,7 +30,7 @@ if [[ "$WITH_TOKENIZER" == "1" ]]; then
   extras+=(--extra tokenizer)
 fi
 
-echo "Bootstrapping pgolf_recurrent_qat"
+echo "Bootstrapping autoresearch-parameter-golf"
 echo "ROOT_DIR=$ROOT_DIR"
 echo "WITH_DEV=$WITH_DEV"
 echo "WITH_TOKENIZER=$WITH_TOKENIZER"

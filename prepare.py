@@ -53,7 +53,7 @@ def download_remote_file(repo_id: str, relative_path: str) -> Path:
     if destination.exists():
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = Request(hf_resolve_url(repo_id, relative_path), headers={"User-Agent": "pgolf-recurrent-qat/0.1.0"})
+    request = Request(hf_resolve_url(repo_id, relative_path), headers={"User-Agent": "autoresearch-parameter-golf/0.1.0"})
     tmp_path = destination.with_name(f".{destination.name}.tmp")
     with urlopen(request) as response, tmp_path.open("wb") as handle:
         shutil.copyfileobj(response, handle)

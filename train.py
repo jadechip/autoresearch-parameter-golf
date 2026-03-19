@@ -147,7 +147,7 @@ class TrainConfig:
     train_pattern: str = "./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin"
     val_pattern: str = "./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin"
     tokenizer_path: str | None = "./data/tokenizers/fineweb_1024_bpe.model"
-    output_dir: str = "./out_pgolf_recurrent_qat"
+    output_dir: str = "./out_autoresearch_parameter_golf"
     run_name: str | None = None
     results_tsv_path: str = "./results.tsv"
     metrics_jsonl_path: str | None = None

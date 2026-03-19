@@ -1,15 +1,22 @@
-# Depth-Recurrent QAT GPT for Parameter Golf
+# autoresearch-parameter-golf
 
-This repo turns the original single-file reference into a production-shaped training, export, reload, and evaluation setup while keeping the core model/training logic centered in one editable file:
+`autoresearch-parameter-golf` is a starter kit for the [OpenAI Parameter Golf](https://github.com/openai/parameter-golf) contest.
 
-- `train.py`: main mutation target for model/training/search changes
-- `prepare.py`: fixed smoke-data, tokenizer, and artifact-eval utilities
-- `program.md`: instructions for external agents
-- `validate_results.py`: fixed `results.json` schema validator
-- `summarize_artifact.py`: submission-oriented artifact summary
-- `train_pgolf_recurrent_qat.py`: compatibility wrapper for the old entrypoint
+It is not the official contest repo. Instead, it packages a strong recurrent-QAT baseline into a repo that is easier to train, export, reload, evaluate, and search with an external coding agent. The main goal is to give you a practical boilerplate that:
 
-The baseline architecture is preserved by default:
+- follows the Parameter Golf data and artifact conventions closely
+- keeps `train.py` as the main editable surface
+- works standalone for manual runs
+- ships with an `autoresearch`-style loop out of the box
+- writes structured outputs so agents do not need to scrape logs
+
+If you want the official challenge rules, dataset notes, and submission requirements, start with:
+
+- `https://github.com/openai/parameter-golf`
+
+## What This Repo Is
+
+This repo takes the original single-file reference implementation and turns it into a more usable experimentation harness while preserving the intended baseline architecture by default:
 
 - decoder-only LM
 - tied embeddings
@@ -23,42 +30,92 @@ The baseline architecture is preserved by default:
 - row-wise INT8 export with zlib packing
 - optional linear weight averaging
 
-## Install
+The core files are:
+
+- `train.py`: main mutation target for model/training/search changes
+- `prepare.py`: fixed smoke-data, tokenizer, and artifact-eval utilities
+- `program.md`: rules for external coding agents
+- `CODEX_AUTORESEARCH_PROMPT.md`: copy/paste prompt for Codex
+- `validate_results.py`: fixed `results.json` schema validator
+- `summarize_artifact.py`: submission-oriented artifact summary
+- `watch_run.py`: live terminal monitor for one run
+- `compare_runs.py`: compact terminal comparison view for many runs
+- `train_pgolf_recurrent_qat.py`: compatibility wrapper for the old entrypoint
+
+## What This Repo Is Not
+
+- not the official leaderboard repo
+- not a fully code-golfed final submission
+- not locked to one training workflow
+
+Think of it as a contest-oriented starter kit: a clean place to build, measure, and search before final submission packaging.
+
+## The Fastest Way To Get Going
+
+If you just want to get to a real run quickly:
+
+```bash
+bash scripts/bootstrap.sh
+TRAIN_SHARDS=1 bash scripts/download_official_fineweb.sh
+bash scripts/run_autoresearch_experiment.sh
+```
+
+Then, in a second terminal:
+
+```bash
+uv run pgolf-watch-run ./runs/autoresearch_5090/index/latest.json
+```
+
+That gives you:
+
+- official cached FineWeb shards in the local `./data/` layout
+- one fixed-budget training run
+- a live view of loss, LR, validation, and timing from `metrics.jsonl`
+
+## Installation
 
 Use a clean environment. The repo is pinned in `pyproject.toml`.
+
+Recommended:
 
 ```bash
 bash scripts/bootstrap.sh
 ```
 
-Equivalent manual install:
+Manual equivalent:
 
 ```bash
 uv sync --frozen --extra dev --extra tokenizer
 ```
 
-If you do not need real SentencePiece evaluation, `--extra tokenizer` is optional:
+If you do not need real SentencePiece evaluation:
 
 ```bash
 bash scripts/bootstrap.sh --no-tokenizer
 ```
 
-For common tasks, there is also a small `Makefile`:
+There is also a small `Makefile` for common commands:
 
 ```bash
 make install
 make smoke
+make train-5090
+make autoresearch-baseline
+make watch-latest
+make compare-autoresearch
 ```
 
-## Quick Start
+## Quick Start Paths
 
-Create tiny synthetic shards and a matching smoke config:
+### 1. Smoke Test The Full Pipeline
+
+Create tiny synthetic shards:
 
 ```bash
 uv run pgolf-prepare smoke-data --output_dir ./smoke_data
 ```
 
-Run a fixed-time smoke experiment:
+Run a short smoke experiment:
 
 ```bash
 uv run pgolf-train --config_json ./smoke_data/smoke_config.json --max_wallclock_seconds 30
@@ -70,7 +127,7 @@ Validate the structured output:
 uv run pgolf-validate-results ./smoke_data/run/results.json
 ```
 
-Reload the exported artifact and evaluate it end-to-end:
+Reload and evaluate the exported artifact:
 
 ```bash
 uv run pgolf-prepare eval-artifact \
@@ -85,14 +142,12 @@ Summarize submission-relevant bytes:
 uv run pgolf-summarize-artifact --results_json ./smoke_data/run/results.json
 ```
 
-## Official Challenge Data
+### 2. Run A Real Single-GPU Training Job
 
-The upstream `openai/parameter-golf` repo documents an official cached FineWeb downloader for real training. This repo now mirrors that workflow locally through `prepare.py`.
-
-Download the official `sp1024` challenge data and tokenizer into this repo's `./data/` directory:
+Download the official cached challenge data:
 
 ```bash
-bash scripts/download_official_fineweb.sh
+TRAIN_SHARDS=80 bash scripts/download_official_fineweb.sh
 ```
 
 For a smaller iteration subset:
@@ -101,73 +156,77 @@ For a smaller iteration subset:
 TRAIN_SHARDS=1 bash scripts/download_official_fineweb.sh
 ```
 
-Equivalent direct command:
-
-```bash
-uv run pgolf-prepare official-fineweb --variant sp1024 --train-shards 80
-```
-
-This creates the canonical layout expected by the training scripts:
+This mirrors the official `openai/parameter-golf` data layout under:
 
 - `./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin`
 - `./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin`
 - `./data/tokenizers/fineweb_1024_bpe.model`
 
-## Runpod Single-GPU Preset
-
-Recommended GPU: `RTX 5090`.
-
-Conservative ready-to-run preset files:
-
-- `configs/runpod_5090_single_gpu.json`
-- `scripts/runpod_5090_train.sh`
-
-Example:
+Run the conservative 5090 preset:
 
 ```bash
-TRAIN_SHARDS=1 bash scripts/download_official_fineweb.sh
 bash scripts/runpod_5090_train.sh
 ```
 
-In a second terminal, watch the live metrics stream for the current run:
+Watch it live:
 
 ```bash
 uv run pgolf-watch-run ./runs/runpod_5090_single_gpu
 ```
 
-## 5090 Autoresearch Loop
+### 3. Start The Built-In Autoresearch Loop
 
-For broad search on cheaper hardware, use the fixed-budget 5090 wrapper instead of long manual runs:
+For search on cheaper hardware, use the fixed-budget 5090 loop:
 
 ```bash
-TRAIN_SHARDS=1 bash scripts/download_official_fineweb.sh
 bash scripts/run_autoresearch_experiment.sh
 ```
 
-This runs a single `300s` experiment with:
+This creates:
 
-- a unique run directory under `./runs/autoresearch_5090/runs/`
+- one run directory under `./runs/autoresearch_5090/runs/`
 - append-only `./runs/autoresearch_5090/results.tsv`
 - stable agent-readable pointers:
   - `./runs/autoresearch_5090/index/latest.json`
   - `./runs/autoresearch_5090/index/best.json`
 
-Useful companion commands:
+Watch the latest run:
 
 ```bash
 make watch-latest
+```
+
+Compare completed runs:
+
+```bash
 make compare-autoresearch
 ```
 
-The intended flow is:
-
-1. search on `1x5090`
-2. promote only clear wins to `1xH100`
-3. reserve `8xH100` for exact-budget submission rehearsals and record attempts
-
-For Codex sessions, use the bootstrap prompt in:
+For Codex sessions, use:
 
 - `CODEX_AUTORESEARCH_PROMPT.md`
+
+For the durable policy and allowed search space, use:
+
+- `program.md`
+
+## How This Relates To Autoresearch
+
+This repo is shaped to work well with `karpathy/autoresearch`-style loops:
+
+- one main editable file: `train.py`
+- fixed helper utilities: `prepare.py`, validators, wrappers
+- structured results instead of raw-log control
+- repeatable fixed-budget experiment wrapper
+- branch/history-based search policy in `program.md`
+
+The intended workflow is:
+
+1. search cheaply on `1x5090`
+2. promote only meaningful winners to `1xH100`
+3. reserve `8xH100` for exact-budget rehearsal and serious submission attempts
+
+That keeps the cheap search tier aligned with the real contest without burning expensive cluster time on bad ideas.
 
 ## Structured Outputs
 
@@ -193,17 +252,9 @@ The training script also prints grep-friendly final lines:
 - `depth:`
 - `artifact_bytes:`
 
-## Repo Notes
-
-- `train.py` is intentionally the main editable file for external search loops.
-- `prepare.py`, `validate_results.py`, `summarize_artifact.py`, and the docs are intended to stay stable.
-- Export accounting snapshots the counted code files into `submission_bundle/code/` and counts those exact bytes plus the compressed model bytes.
-- The default counted code set is just `train.py`, which keeps artifact accounting aligned with Parameter Golf’s preference for a single counted training file.
-- Autonomous runs should be sandboxed and should read `results.json` / `crash.json`, not arbitrary stdout.
-
 ## Live Monitoring
 
-Single run, including a continuously updating LR/loss view:
+Watch one run, including continuously updating LR/loss charts:
 
 ```bash
 uv run pgolf-watch-run ./runs/autoresearch_5090/index/latest.json
@@ -221,9 +272,17 @@ Compare completed runs from `results.tsv`:
 uv run pgolf-compare-runs --results_tsv ./runs/autoresearch_5090/results.tsv
 ```
 
+## Notes On Artifact Accounting
+
+- `train.py` is intentionally the main editable file for external search loops.
+- `prepare.py`, `validate_results.py`, `summarize_artifact.py`, and the docs are intended to stay stable.
+- Export accounting snapshots the counted code files into `submission_bundle/code/` and counts those exact bytes plus the compressed model bytes.
+- The default counted code set is just `train.py`, which keeps artifact accounting close to Parameter Golf’s preference for a single counted training file.
+- Autonomous runs should be sandboxed and should read `results.json` / `crash.json`, not arbitrary stdout.
+
 ## Tests
 
-CPU smoke:
+CPU-only:
 
 ```bash
 pytest -q
