@@ -48,6 +48,12 @@ This creates:
 - `./.autoresearch/experiments.jsonl`
 - `./.autoresearch/notes.md`
 
+The session file now carries a production-aligned search policy, including:
+
+- a soft 5090 artifact target band of `7,000,000` to `12,000,000` bytes
+- a `~0.001 val_bpb` meaningful-win threshold
+- a limit of `3` consecutive losing micro-tuning runs before the next run should be structural / byte-allocation oriented
+
 Once initialized, non-baseline autoresearch runs will refuse to start unless `session.json` is in `ready` state.
 
 5. Optional live monitor in a second terminal:
@@ -102,6 +108,9 @@ Codex should create and manage its own dedicated autoresearch branch for the ses
 - Keep winners as normal commits and revert losers with normal revert commits so the full search history stays visible.
 - Use `.autoresearch/session.json` as the readiness gate before starting new experiments.
 - Use `.autoresearch/experiments.jsonl` as append-only local experiment telemetry.
+- Use `.autoresearch/notes.md` as the structural hypothesis ledger for open, tried, winning, and rejected ideas.
+- In a fresh session, cover structural axes early: `d_model`, `shared_layers` vs `recurrence_loops`, `tail_layers`, `mlp_mult`, `adapter_rank` / `adapter_targets`, and fake-quant timing / clip percentile.
+- If artifact size remains below the search target band, prefer bounded architecture / byte-allocation experiments before long stretches of optimizer micro-tuning.
 - If resuming, point `--resume_from` at `output_dir/checkpoints/final.pt` or `latest.pt`.
 
 ## Useful Commands

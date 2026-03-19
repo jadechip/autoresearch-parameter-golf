@@ -22,6 +22,7 @@ Before doing anything else:
 - if you are not already on a dedicated autoresearch branch, create one yourself with a timestamped name like autoresearch/20260319-153000
 - inspect recent commits on that branch
 - inspect .autoresearch/session.json and do not start experimenting unless it exists and status=ready
+- inspect `.autoresearch/session.json["search_policy"]` and `.autoresearch/notes.md`
 - inspect runs/autoresearch_5090/index/best.json
 
 Git policy for this session:
@@ -36,9 +37,11 @@ Current control files:
 - runs/autoresearch_5090/index/best.json
 - .autoresearch/session.json
 - .autoresearch/experiments.jsonl
+- .autoresearch/notes.md
 
 Before making a new change:
 - inspect the current best.json again if needed
+- inspect the current hypothesis ledger in `.autoresearch/notes.md`
 
 Primary goal:
 - minimize val_bpb
@@ -50,7 +53,7 @@ Secondary constraints:
 - prefer simplicity
 
 Rules:
-- Edit only train.py.
+- Edit only `train.py` and the local session file `.autoresearch/notes.md`.
 - Do not modify prepare.py, helper scripts, docs, or dependencies.
 - Run one experiment at a time with: bash scripts/run_autoresearch_experiment.sh
 - Use runs/autoresearch_5090/index/latest.json and runs/autoresearch_5090/index/best.json as the control surface.
@@ -58,7 +61,10 @@ Rules:
 - Treat runs/autoresearch_5090/index/best.json as numeric telemetry, not the sole source of truth for accepted state.
 - Architecture changes inside the current recurrent-QAT baseline family are allowed and encouraged.
 - Do not chase 5090-only hacks that are unlikely to matter on H100.
-- If artifact size remains far below the cap, consider bounded architecture changes instead of only micro-tuning optimizer settings.
+- If accepted artifact size remains below the search-policy target band, prefer bounded architecture and byte-allocation experiments over endless optimizer micro-tuning.
+- The first search block in a fresh session should cover structural axes before long micro-tuning streaks: `d_model`, `shared_layers` vs `recurrence_loops`, `tail_layers`, `mlp_mult`, `adapter_rank` / `adapter_targets`, and fake-quant timing / clip percentile.
+- Do not spend more than the search-policy limit of consecutive losing micro-tuning experiments without making the next run a structural or byte-allocation experiment.
+- Use `.autoresearch/notes.md` as a durable ledger of open, tried, winning, and rejected structural hypotheses.
 - If a run fails, inspect crash.json and fix only if the idea still seems sound.
 - Before each run, commit the exact train.py experiment to the current autoresearch branch.
 - Include the experiment idea in the pre-run commit message.
@@ -67,6 +73,7 @@ Rules:
 - Include the run id and val_bpb in the post-run keep/revert commit message when possible.
 - After each keep/revert decision, update the Ralph-style state file with:
   `uv run python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
+- After each keep/revert decision, update `.autoresearch/notes.md` with a short note about what hypothesis was tested and whether it won, lost, or remains unresolved.
 - Use recent git history as memory so you do not repeat the same weak ideas.
 - Keep one experiment per code change.
 - Keep the branch tip equal to the current accepted candidate.
@@ -75,11 +82,11 @@ Rules:
 
 Expected command loop inside Codex:
 
-1. inspect branch tip, `.autoresearch/session.json`, recent commits, and `runs/autoresearch_5090/index/best.json`
+1. inspect branch tip, `.autoresearch/session.json`, `.autoresearch/notes.md`, recent commits, and `runs/autoresearch_5090/index/best.json`
 2. edit `train.py`
 3. commit the experiment
 4. run `bash scripts/run_autoresearch_experiment.sh`
 5. inspect `latest.json`, `best.json`, and the concrete run outputs
 6. keep the commit if it wins, otherwise add a revert commit
-7. record the decision in `.autoresearch/session.json`
+7. record the decision in `.autoresearch/session.json` and update `.autoresearch/notes.md`
 8. continue

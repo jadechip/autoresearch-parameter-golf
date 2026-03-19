@@ -18,6 +18,7 @@ At the start of a session, inspect:
 - if needed, create a dedicated autoresearch branch for the session
 - recent git history on that autoresearch branch
 - `.autoresearch/session.json`
+- `.autoresearch/notes.md`
 - `runs/autoresearch_5090/index/best.json`
 
 Use git history as the experiment memory for what has already been tried and what has already won.
@@ -33,6 +34,7 @@ Accepted-state policy:
 ## What You May Edit
 
 - Edit `train.py`.
+- You may also update `.autoresearch/notes.md` as local session memory for hypotheses and outcomes.
 - You may change hyperparameters, defaults, schedules, adapter placement, quantization behavior, and model/training details inside `train.py`.
 - Architecture changes inside the current baseline family are allowed and expected.
 - Keep the default architecture recognizable unless a replacement is clearly better and backed by measured results.
@@ -53,6 +55,7 @@ Use structured files instead:
 - `runs/autoresearch_5090/index/best.json`
 - `.autoresearch/session.json`
 - `.autoresearch/experiments.jsonl`
+- `.autoresearch/notes.md`
 
 ## Files That Should Usually Stay Fixed
 
@@ -109,6 +112,12 @@ Subject to:
 
 This repo's current 5090 baseline materially under-spends the final artifact budget. Do not assume the best search strategy is to keep the model tiny and only polish optimizer settings. Favor ideas that plausibly improve the final `8xH100` submission regime, including sensible use of additional bytes.
 
+Use the search policy recorded in `.autoresearch/session.json`:
+
+- soft artifact target band for 5090 search: `7,000,000` to `12,000,000` bytes
+- meaningful improvement threshold: about `0.001 val_bpb`
+- maximum consecutive losing micro-tuning runs before a required structural follow-up: `3`
+
 ## Search Space
 
 Prioritize production-relevant knobs first:
@@ -129,6 +138,15 @@ Prioritize production-relevant knobs first:
 
 If artifact usage remains far below the cap, prefer bounded architecture / byte-allocation experiments before endless micro-tuning of optimizer settings.
 
+In a fresh session, the first search block should deliberately cover structural axes before settling into local hill-climbing:
+
+- `d_model`
+- `shared_layers` vs `recurrence_loops`
+- `tail_layers`
+- `mlp_mult`
+- `adapter_rank` / `adapter_targets`
+- `fake_quant_start_step` / `clip_percentile`
+
 Avoid spending time on:
 
 - 5090-specific hacks that are unlikely to transfer to H100
@@ -140,6 +158,7 @@ Avoid spending time on:
 
 - Work on a dedicated autoresearch branch. If one does not already exist for the session, create it yourself.
 - Before proposing a new mutation, inspect recent commits so you do not waste runs repeating the same idea.
+- Before proposing a new mutation, inspect `.autoresearch/notes.md` so you do not waste runs repeating the same weak structural idea.
 - Use the 5090 autoresearch loop for broad search:
   `bash scripts/run_autoresearch_experiment.sh`
 - Keep experiments on a fixed 300-second budget.
@@ -147,6 +166,9 @@ Avoid spending time on:
 - Prefer simpler wins first.
 - Treat improvements smaller than roughly `0.001 val_bpb` as noise unless they also simplify the code or clearly move the model toward a better production regime.
 - Reject hacks that add complexity for tiny gains.
+- If accepted artifact size is still below the policy target band, do not spend long stretches only micro-tuning optimizer values.
+- Do not spend more than `3` consecutive losing micro-tuning runs without making the next run a structural / byte-allocation experiment.
+- Alternate broader structural probes with local refinements once you find a promising larger-capacity direction.
 - Keep code changes local and legible.
 - If a change risks export/reload parity or structured outputs, do not ship it without tests.
 - If a run fails, inspect `crash.json` and `results.json` before changing code.
@@ -165,6 +187,7 @@ Git discipline:
 - Treat the current branch tip plus recent commits as the authoritative memory of accepted state.
 - After each keep/revert decision, update `.autoresearch/session.json` with:
   `uv run python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
+- After each keep/revert decision, update `.autoresearch/notes.md` with a short hypothesis note so the next fresh Codex iteration can see which structural directions are still open.
 
 Among candidates with similar `val_bpb`, prefer:
 

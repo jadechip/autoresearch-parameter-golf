@@ -12,6 +12,18 @@ from train import append_jsonl, atomic_write_json, load_and_validate_results
 
 SESSION_SCHEMA_VERSION = "pgolf.autoresearch_session.v1"
 EXPERIMENT_LOG_SCHEMA_VERSION = "pgolf.autoresearch_experiment.v1"
+SEARCH_MIN_MEANINGFUL_BPB_GAIN = 0.001
+SEARCH_ARTIFACT_TARGET_BYTES_MIN = 7_000_000
+SEARCH_ARTIFACT_TARGET_BYTES_MAX = 12_000_000
+SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS = 3
+SEARCH_STRUCTURAL_AXES = [
+    "d_model",
+    "shared_layers_vs_recurrence_loops",
+    "tail_layers",
+    "mlp_mult",
+    "adapter_rank_and_targets",
+    "fake_quant_start_step_and_clip_percentile",
+]
 
 
 def repo_root() -> Path:
@@ -98,8 +110,25 @@ def ensure_notes_file(state_dir: Path) -> None:
         return
     path.write_text(
         "# Autoresearch Notes\n\n"
-        "- Accepted state is the current branch tip plus `session.json`.\n"
-        "- Use this file for short durable notes and lessons learned.\n",
+        "Accepted state:\n"
+        "- The accepted code state is the current branch tip plus `session.json`.\n"
+        "- Numeric `best.json` is telemetry only; it may point at a reverted run.\n\n"
+        "Current campaign:\n"
+        f"- Soft artifact target band for 5090 search: {SEARCH_ARTIFACT_TARGET_BYTES_MIN:,} to {SEARCH_ARTIFACT_TARGET_BYTES_MAX:,} bytes.\n"
+        f"- Meaningful improvement threshold: about {SEARCH_MIN_MEANINGFUL_BPB_GAIN:.3f} val_bpb.\n"
+        f"- Do not spend more than {SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS} consecutive losing micro-tuning runs without a structural / byte-allocation experiment.\n\n"
+        "Structural campaign checklist:\n"
+        "- [ ] d_model\n"
+        "- [ ] shared_layers vs recurrence_loops\n"
+        "- [ ] tail_layers\n"
+        "- [ ] mlp_mult\n"
+        "- [ ] adapter_rank / adapter_targets\n"
+        "- [ ] fake_quant_start_step / clip_percentile\n\n"
+        "Hypothesis ledger:\n"
+        "- Open:\n"
+        "- Tried:\n"
+        "- Won:\n"
+        "- Rejected:\n",
         encoding="utf-8",
     )
 
@@ -131,16 +160,26 @@ def init_session(state_dir: Path, baseline_results_path: Path, force: bool = Fal
         "accepted_commit_short": commit_short,
         "accepted_run_id": baseline["run_id"],
         "accepted_val_bpb": baseline["val_bpb"],
+        "accepted_artifact_bytes": baseline["artifact_bytes"],
         "accepted_results_path": str(resolved_results),
         "baseline_run_id": baseline["run_id"],
         "baseline_val_bpb": baseline["val_bpb"],
+        "baseline_artifact_bytes": baseline["artifact_bytes"],
         "baseline_results_path": str(resolved_results),
         "latest_run_id": baseline["run_id"],
         "latest_results_path": str(resolved_results),
         "latest_status": baseline["status"],
         "latest_val_bpb": baseline["val_bpb"],
+        "latest_artifact_bytes": baseline["artifact_bytes"],
         "latest_decision": "accepted",
         "current_experiment": None,
+        "search_policy": {
+            "min_meaningful_bpb_gain": SEARCH_MIN_MEANINGFUL_BPB_GAIN,
+            "artifact_target_bytes_min": SEARCH_ARTIFACT_TARGET_BYTES_MIN,
+            "artifact_target_bytes_max": SEARCH_ARTIFACT_TARGET_BYTES_MAX,
+            "max_consecutive_losing_micro_experiments": SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS,
+            "structural_axes": list(SEARCH_STRUCTURAL_AXES),
+        },
     }
     write_session(state_dir, session)
     ensure_notes_file(state_dir)
@@ -240,6 +279,7 @@ def finish_run(state_dir: Path, results_json: Path) -> dict[str, Any]:
     session["latest_results_path"] = str(resolved_results)
     session["latest_status"] = results["status"]
     session["latest_val_bpb"] = results["val_bpb"]
+    session["latest_artifact_bytes"] = results["artifact_bytes"]
     session["current_experiment"] = None
     write_session(state_dir, session)
     return load_session(state_dir)
@@ -297,6 +337,7 @@ def decide_run(state_dir: Path, run_id: str, decision: str, results_json: Path |
         session["accepted_run_id"] = run_id
         if results is not None:
             session["accepted_val_bpb"] = results["val_bpb"]
+            session["accepted_artifact_bytes"] = results["artifact_bytes"]
             session["accepted_results_path"] = str(resolved_results)
     write_session(state_dir, session)
     return load_session(state_dir)

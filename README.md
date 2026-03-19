@@ -60,6 +60,12 @@ This creates a lightweight Ralph-style state directory at:
 
 Once that file exists, non-baseline autoresearch runs are gated on `session.json` being in `ready` state. This prevents Codex from starting prematurely against an uninitialized repo.
 
+The session file also carries the current search policy for Codex, including:
+
+- a soft 5090 artifact target band of `7,000,000` to `12,000,000` bytes
+- a `~0.001 val_bpb` meaningful-win threshold
+- a limit of `3` consecutive losing micro-tunes before the next run should be structural
+
 ### 5. Watch Progress With TensorBoard In Another Terminal
 
 ```bash
@@ -117,9 +123,11 @@ The expected Codex behavior is:
 - edit `train.py`
 - run one experiment at a time with `bash scripts/run_autoresearch_experiment.sh`
 - read `latest.json` and `best.json`
+- read `.autoresearch/session.json` and `.autoresearch/notes.md`
 - keep meaningful winners
 - revert losers
 - use git history as experiment memory
+- cover structural / byte-allocation directions early instead of only micro-tuning optimizer values
 
 ### 3. Exact Human Setup For Codex
 

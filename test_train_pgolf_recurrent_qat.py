@@ -672,7 +672,14 @@ def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path) -> None
     session = autoresearch_state.init_session(state_dir, baseline_results)
     assert session["status"] == "ready"
     assert session["accepted_run_id"] == "baseline"
+    assert session["accepted_artifact_bytes"] == 1
+    assert session["search_policy"]["artifact_target_bytes_min"] == 7_000_000
+    assert session["search_policy"]["artifact_target_bytes_max"] == 12_000_000
+    assert session["search_policy"]["max_consecutive_losing_micro_experiments"] == 3
     assert (state_dir / "notes.md").is_file()
+    notes_text = (state_dir / "notes.md").read_text(encoding="utf-8")
+    assert "Structural campaign checklist" in notes_text
+    assert "- [ ] d_model" in notes_text
 
     started = autoresearch_state.start_run(
         state_dir,
@@ -691,10 +698,12 @@ def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path) -> None
     assert finished["status"] == "ready"
     assert finished["latest_run_id"] == "trial_a"
     assert finished["latest_val_bpb"] == 1.75
+    assert finished["latest_artifact_bytes"] == 1
 
     decided = autoresearch_state.decide_run(state_dir, "trial_a", "accepted", trial_results)
     assert decided["accepted_run_id"] == "trial_a"
     assert decided["accepted_val_bpb"] == 1.75
+    assert decided["accepted_artifact_bytes"] == 1
 
     events = [
         json.loads(line)
