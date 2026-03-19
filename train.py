@@ -360,6 +360,16 @@ def reallocate_one_shared_layer_into_tail(model_cfg: ModelConfig) -> None:
     model_cfg.tail_layers = total_depth - model_cfg.stem_layers - model_cfg.shared_layers * model_cfg.recurrence_loops
 
 
+def reallocate_second_shared_layer_into_tail(model_cfg: ModelConfig) -> None:
+    if model_cfg.shared_layers != 3 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    total_depth = model_cfg.effective_depth
+    model_cfg.shared_layers -= 1
+    model_cfg.tail_layers = total_depth - model_cfg.stem_layers - model_cfg.shared_layers * model_cfg.recurrence_loops
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2937,6 +2947,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     rebalance_shared_layers_vs_loops(cfg.model)
     expand_adapter_capacity(cfg.model)
     reallocate_one_shared_layer_into_tail(cfg.model)
+    reallocate_second_shared_layer_into_tail(cfg.model)
     return cfg
 
 
