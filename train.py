@@ -338,14 +338,6 @@ def rebalance_shared_layers_vs_loops(model_cfg: ModelConfig) -> None:
     model_cfg.recurrence_loops = target_loops
 
 
-def widen_mlp_on_balanced_4x2_layout(model_cfg: ModelConfig) -> None:
-    if model_cfg.shared_layers != 4 or model_cfg.recurrence_loops != 2:
-        return
-    if model_cfg.tail_layers != 1 or model_cfg.mlp_mult != 2:
-        return
-    model_cfg.mlp_mult = 3
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2921,7 +2913,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     if args.evaluate_only:
         cfg.evaluate_only = True
     rebalance_shared_layers_vs_loops(cfg.model)
-    widen_mlp_on_balanced_4x2_layout(cfg.model)
     return cfg
 
 
