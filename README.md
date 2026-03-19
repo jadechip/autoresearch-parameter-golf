@@ -28,35 +28,52 @@ The baseline architecture is preserved by default:
 Use a clean environment. The repo is pinned in `pyproject.toml`.
 
 ```bash
-uv sync --extra dev --extra tokenizer
+bash scripts/bootstrap.sh
 ```
 
-If you do not need real SentencePiece evaluation, `--extra tokenizer` is optional.
+Equivalent manual install:
+
+```bash
+uv sync --frozen --extra dev --extra tokenizer
+```
+
+If you do not need real SentencePiece evaluation, `--extra tokenizer` is optional:
+
+```bash
+bash scripts/bootstrap.sh --no-tokenizer
+```
+
+For common tasks, there is also a small `Makefile`:
+
+```bash
+make install
+make smoke
+```
 
 ## Quick Start
 
 Create tiny synthetic shards and a matching smoke config:
 
 ```bash
-python prepare.py smoke-data --output_dir ./smoke_data
+uv run pgolf-prepare smoke-data --output_dir ./smoke_data
 ```
 
 Run a fixed-time smoke experiment:
 
 ```bash
-python train.py --config_json ./smoke_data/smoke_config.json --max_wallclock_seconds 30
+uv run pgolf-train --config_json ./smoke_data/smoke_config.json --max_wallclock_seconds 30
 ```
 
 Validate the structured output:
 
 ```bash
-python validate_results.py ./smoke_data/run/results.json
+uv run pgolf-validate-results ./smoke_data/run/results.json
 ```
 
 Reload the exported artifact and evaluate it end-to-end:
 
 ```bash
-python prepare.py eval-artifact \
+uv run pgolf-prepare eval-artifact \
   --config_json ./smoke_data/smoke_config.json \
   --artifact_path ./smoke_data/run/submission_bundle \
   --output_dir ./smoke_data/eval
@@ -65,7 +82,7 @@ python prepare.py eval-artifact \
 Summarize submission-relevant bytes:
 
 ```bash
-python summarize_artifact.py --results_json ./smoke_data/run/results.json
+uv run pgolf-summarize-artifact --results_json ./smoke_data/run/results.json
 ```
 
 ## Official Challenge Data
@@ -87,7 +104,7 @@ TRAIN_SHARDS=1 bash scripts/download_official_fineweb.sh
 Equivalent direct command:
 
 ```bash
-uv run python prepare.py official-fineweb --variant sp1024 --train-shards 80
+uv run pgolf-prepare official-fineweb --variant sp1024 --train-shards 80
 ```
 
 This creates the canonical layout expected by the training scripts:
@@ -112,6 +129,12 @@ TRAIN_SHARDS=1 bash scripts/download_official_fineweb.sh
 bash scripts/runpod_5090_train.sh
 ```
 
+In a second terminal, watch the live metrics stream for the current run:
+
+```bash
+uv run pgolf-watch-run ./runs/runpod_5090_single_gpu
+```
+
 ## 5090 Autoresearch Loop
 
 For broad search on cheaper hardware, use the fixed-budget 5090 wrapper instead of long manual runs:
@@ -129,11 +152,22 @@ This runs a single `300s` experiment with:
   - `./runs/autoresearch_5090/index/latest.json`
   - `./runs/autoresearch_5090/index/best.json`
 
+Useful companion commands:
+
+```bash
+make watch-latest
+make compare-autoresearch
+```
+
 The intended flow is:
 
 1. search on `1x5090`
 2. promote only clear wins to `1xH100`
 3. reserve `8xH100` for exact-budget submission rehearsals and record attempts
+
+For Codex sessions, use the bootstrap prompt in:
+
+- `CODEX_AUTORESEARCH_PROMPT.md`
 
 ## Structured Outputs
 
@@ -141,6 +175,7 @@ Do not control runs by tailing raw logs. Consume these files instead:
 
 - `output_dir/results.json`: fixed-schema result summary
 - `output_dir/crash.json`: structured crash metadata on failure
+- `output_dir/metrics.jsonl`: append-only per-step/per-eval metrics stream for live monitoring
 - `results.tsv`: append-only experiment table
 - `output_dir/submission_bundle/manifest.json`: export manifest and byte accounting
 - `output_dir/checkpoints/latest.pt` and `final.pt`: resume points
@@ -165,6 +200,26 @@ The training script also prints grep-friendly final lines:
 - Export accounting snapshots the counted code files into `submission_bundle/code/` and counts those exact bytes plus the compressed model bytes.
 - The default counted code set is just `train.py`, which keeps artifact accounting aligned with Parameter Golf’s preference for a single counted training file.
 - Autonomous runs should be sandboxed and should read `results.json` / `crash.json`, not arbitrary stdout.
+
+## Live Monitoring
+
+Single run, including a continuously updating LR/loss view:
+
+```bash
+uv run pgolf-watch-run ./runs/autoresearch_5090/index/latest.json
+```
+
+Choose different metrics:
+
+```bash
+uv run pgolf-watch-run ./runs/runpod_5090_single_gpu --metrics train_loss,matrix_lr,val_bpb
+```
+
+Compare completed runs from `results.tsv`:
+
+```bash
+uv run pgolf-compare-runs --results_tsv ./runs/autoresearch_5090/results.tsv
+```
 
 ## Tests
 

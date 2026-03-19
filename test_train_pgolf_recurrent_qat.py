@@ -15,7 +15,9 @@ import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
+import compare_runs
 import train as mod
+import watch_run
 
 
 class FakeTokenizer:
@@ -329,8 +331,12 @@ def test_full_smoke_train_and_export(tmp_path: Path) -> None:
     assert summary.export.artifact_bytes > 0
     assert Path(summary.export.manifest_path).exists()
     assert results["artifact_bytes"] == summary.export.artifact_bytes
-    assert summary.export.reload_val_bpb is not None
-    assert abs(summary.export.reload_val_bpb - (summary.val_bpb or 0.0)) < 0.05
+    assert summary.export.reload_val_loss is not None
+    if summary.val_bpb is None:
+        assert summary.export.reload_val_bpb is None
+    else:
+        assert summary.export.reload_val_bpb is not None
+        assert abs(summary.export.reload_val_bpb - summary.val_bpb) < 0.05
 
 
 def test_export_reload_validation_parity(tmp_path: Path) -> None:
@@ -343,8 +349,11 @@ def test_export_reload_validation_parity(tmp_path: Path) -> None:
     eval_cfg.load_artifact_path = str(Path(train_cfg.output_dir) / train_cfg.artifact_bundle_name)
     eval_summary = mod.evaluate_exported_artifact(eval_cfg)
     assert train_summary.export is not None
-    assert train_summary.export.reload_val_bpb is not None
-    assert abs(eval_summary.val_bpb - train_summary.export.reload_val_bpb) < 1e-6
+    if train_summary.export.reload_val_bpb is None:
+        assert eval_summary.val_bpb is None
+    else:
+        assert abs(eval_summary.val_bpb - train_summary.export.reload_val_bpb) < 1e-6
+    assert train_summary.export.reload_val_loss is not None
     assert abs(eval_summary.val_loss - train_summary.export.reload_val_loss) < 1e-6
 
 
@@ -433,6 +442,94 @@ def test_results_validator_script(tmp_path: Path) -> None:
         text=True,
     )
     assert '"validated": true' in proc.stdout.lower()
+
+
+def test_metrics_jsonl_written_for_training_run(tmp_path: Path) -> None:
+    make_easy_shards(tmp_path)
+    cfg = tiny_cfg(tmp_path)
+    cfg.metrics_jsonl_path = "metrics.jsonl"
+    mod.train_one_run(cfg)
+    metrics_path = Path(cfg.output_dir) / "metrics.jsonl"
+    events = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(event["event"] == "run_start" for event in events)
+    assert any(event["event"] == "train" for event in events)
+    assert any(event["event"] == "val" for event in events)
+    assert events[-1]["event"] == "summary"
+    train_event = next(event for event in events if event["event"] == "train")
+    assert train_event["matrix_lr"] > 0.0
+    results = json.loads((Path(cfg.output_dir) / "results.json").read_text(encoding="utf-8"))
+    assert results["metrics_path"] == str(metrics_path)
+
+
+def test_watch_run_script_once(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = run_dir / "metrics.jsonl"
+    assert watch_run.parse_metric_names("matrix_lr,val_bpb") == ("matrix_lr", "val_bpb")
+    metrics_events = [
+        {"schema_version": mod.METRICS_STREAM_VERSION, "event": "run_start", "run_id": "demo", "mode": "train"},
+        {"schema_version": mod.METRICS_STREAM_VERSION, "event": "train", "step": 0, "train_loss": 5.0, "matrix_lr": 0.01, "step_seconds": 1.0},
+        {"schema_version": mod.METRICS_STREAM_VERSION, "event": "val", "phase": "final", "step": 0, "val_loss": 4.5, "val_bpb": 2.0},
+        {"schema_version": mod.METRICS_STREAM_VERSION, "event": "summary", "status": "success", "step": 0, "num_steps": 1, "val_bpb": 2.0},
+    ]
+    metrics_path.write_text("\n".join(json.dumps(event) for event in metrics_events) + "\n", encoding="utf-8")
+    (run_dir / "results.json").write_text(
+        json.dumps(
+            {
+                "schema_version": mod.RESULTS_SCHEMA_VERSION,
+                "status": "success",
+                "mode": "train",
+                "run_id": "demo",
+                "config_hash": "hash-demo",
+                "output_dir": str(run_dir),
+                "results_path": str(run_dir / "results.json"),
+                "config_path": str(run_dir / "config.json"),
+                "metrics_path": str(metrics_path),
+                "started_at_unix": 0.0,
+                "finished_at_unix": 1.0,
+                "training_seconds": 1.0,
+                "total_seconds": 1.0,
+                "peak_vram_mb": 0.0,
+                "mfu_percent": 0.0,
+                "total_tokens": 1,
+                "total_tokens_M": 0.000001,
+                "num_steps": 1,
+                "num_params": 1,
+                "num_params_M": 0.000001,
+                "depth": 1,
+                "train_loss": 5.0,
+                "val_loss": 4.5,
+                "val_bpb": 2.0,
+                "artifact_bytes": 1,
+                "artifact": None,
+                "benchmark": None,
+                "checkpoint_path": None,
+                "resume_from": None,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, "watch_run.py", str(run_dir), "--once", "--no_clear"],
+        cwd=Path(__file__).parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "matrix_lr" in proc.stdout
+    assert "demo" in proc.stdout
+
+
+def test_compare_runs_render_rows() -> None:
+    rows = [
+        {"run_id": "run_a", "val_bpb": 1.8, "artifact_bytes": 5_000_000, "training_seconds": 300.0, "num_steps": 100, "depth": 10},
+        {"run_id": "run_b", "val_bpb": 1.7, "artifact_bytes": 6_000_000, "training_seconds": 320.0, "num_steps": 120, "depth": 12},
+    ]
+    text = compare_runs.render_rows(rows, sort_by="val_bpb", limit=10)
+    assert "run_b" in text
+    assert "1.700000" in text
+    assert "artifact_MB" in text
 
 
 def test_autoresearch_index_script_updates_latest_and_best(tmp_path: Path) -> None:

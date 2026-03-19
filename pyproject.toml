@@ -21,12 +21,22 @@ tokenizer = [
   "sentencepiece==0.2.1",
 ]
 
+[project.scripts]
+pgolf-prepare = "prepare:main"
+pgolf-train = "train:main"
+pgolf-validate-results = "validate_results:main"
+pgolf-summarize-artifact = "summarize_artifact:main"
+pgolf-watch-run = "watch_run:main"
+pgolf-compare-runs = "compare_runs:main"
+
 [tool.setuptools]
 py-modules = [
+  "compare_runs",
   "train",
   "prepare",
   "validate_results",
   "summarize_artifact",
+  "watch_run",
   "train_pgolf_recurrent_qat",
 ]
 

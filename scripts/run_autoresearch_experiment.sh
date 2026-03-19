@@ -58,5 +58,6 @@ fi
 
 echo "Autoresearch experiment finished"
 echo "Run results: $RESULTS_JSON"
+echo "Run metrics: $OUTPUT_DIR/metrics.jsonl"
 echo "Latest index: $INDEX_DIR/latest.json"
 echo "Best index: $INDEX_DIR/best.json"

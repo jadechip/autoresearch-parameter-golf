@@ -36,6 +36,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 RESULTS_SCHEMA_VERSION = "pgolf.results.v1"
 ARTIFACT_MANIFEST_VERSION = "pgolf.artifact_manifest.v1"
 CHECKPOINT_SCHEMA_VERSION = "pgolf.checkpoint.v1"
+METRICS_STREAM_VERSION = "pgolf.metrics.v1"
 
 EXIT_SUCCESS = 0
 EXIT_INVALID_CONFIG = 2
@@ -46,6 +47,7 @@ ALLOWED_ADAPTER_TARGETS = ("q", "k", "v", "attn_out", "mlp_in", "mlp_out")
 HASH_EXCLUDED_KEYS = {
     "output_dir",
     "results_tsv_path",
+    "metrics_jsonl_path",
     "run_name",
     "resume_from",
     "load_artifact_path",
@@ -148,6 +150,7 @@ class TrainConfig:
     output_dir: str = "./out_pgolf_recurrent_qat"
     run_name: str | None = None
     results_tsv_path: str = "./results.tsv"
+    metrics_jsonl_path: str | None = None
     seed: int = 1337
     deterministic: bool = True
     iterations: int = 20_000
@@ -233,6 +236,7 @@ class RunSummary:
     num_params_M: float
     effective_depth: int
     checkpoint_path: str | None
+    metrics_path: str | None
     results_path: str | None
 
 
@@ -363,6 +367,43 @@ def atomic_write_text(path: str | Path, text: str, encoding: str = "utf-8") -> P
 
 def atomic_write_json(path: str | Path, payload: Any) -> Path:
     return atomic_write_text(path, json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n")
+
+
+def append_jsonl(path: str | Path, payload: Mapping[str, Any]) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(canonical_json_dumps(payload) + "\n")
+        handle.flush()
+    return path
+
+
+def resolve_run_output_path(output_dir: Path, configured_path: str | None, default_name: str) -> Path:
+    if configured_path is None:
+        return output_dir / default_name
+    path = Path(configured_path)
+    if path.is_absolute():
+        return path
+    return output_dir / path
+
+
+def resolve_metrics_jsonl_path(output_dir: Path, configured_path: str | None) -> Path:
+    return resolve_run_output_path(output_dir, configured_path, "metrics.jsonl")
+
+
+def current_optimizer_lr(opt: torch.optim.Optimizer | None) -> float | None:
+    if opt is None or not opt.param_groups:
+        return None
+    return float(opt.param_groups[0]["lr"])
+
+
+def append_metrics_event(path: str | Path, payload: Mapping[str, Any]) -> Path:
+    event = {
+        "schema_version": METRICS_STREAM_VERSION,
+        "event_time_unix": time.time(),
+        **payload,
+    }
+    return append_jsonl(path, event)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -1837,6 +1878,7 @@ def summary_to_results(summary: RunSummary, cfg: TrainConfig, output_dir: Path, 
         "artifact": None if summary.export is None else dataclasses.asdict(summary.export),
         "benchmark": None if summary.benchmark is None else dataclasses.asdict(summary.benchmark),
         "checkpoint_path": summary.checkpoint_path,
+        "metrics_path": summary.metrics_path,
         "resume_from": cfg.resume_from,
     }
     return dict(validate_results_payload(payload))
@@ -1853,6 +1895,7 @@ def write_failure_outputs(
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     finished_at = time.time()
+    metrics_path = resolve_metrics_jsonl_path(output_dir, cfg.metrics_jsonl_path)
     crash_payload = {
         "run_id": run_id,
         "config_hash": cfg_hash,
@@ -1864,6 +1907,18 @@ def write_failure_outputs(
         "finished_at_unix": finished_at,
     }
     crash_path = atomic_write_json(output_dir / "crash.json", crash_payload)
+    append_metrics_event(
+        metrics_path,
+        {
+            "event": "crash",
+            "mode": "eval" if cfg.evaluate_only else ("benchmark" if cfg.benchmark_only else "train"),
+            "run_id": run_id,
+            "config_hash": cfg_hash,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "exit_code": exit_code,
+        },
+    )
     failure_results = {
         "schema_version": RESULTS_SCHEMA_VERSION,
         "status": "failed",
@@ -1892,6 +1947,7 @@ def write_failure_outputs(
         "artifact": None,
         "benchmark": None,
         "checkpoint_path": None,
+        "metrics_path": str(metrics_path),
         "resume_from": cfg.resume_from,
         "crash_path": str(crash_path),
         "exit_code": exit_code,
@@ -1986,6 +2042,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(output_dir / "config.json", config_to_dict(cfg))
+    metrics_path = resolve_metrics_jsonl_path(output_dir, cfg.metrics_jsonl_path)
 
     dist_info = init_distributed()
     session_summary: RunSummary | None = None
@@ -2014,6 +2071,22 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
             resume_state = load_checkpoint(cfg.resume_from, cfg, raw_model, opt_bundle, train_loader, lawa)
             run_id = resume_state.run_id
             cfg_hash = resume_state.config_hash
+
+        if rank0:
+            append_metrics_event(
+                metrics_path,
+                {
+                    "event": "run_start",
+                    "mode": "benchmark" if cfg.benchmark_only else "train",
+                    "run_id": run_id,
+                    "config_hash": cfg_hash,
+                    "output_dir": str(output_dir),
+                    "metrics_path": str(metrics_path),
+                    "resume_from": cfg.resume_from,
+                    "effective_depth": cfg.model.effective_depth,
+                    "max_wallclock_seconds": cfg.max_wallclock_seconds,
+                },
+            )
 
         latest_ckpt_path, final_ckpt_path = checkpoint_paths(output_dir)
         training_start = time.time()
@@ -2065,13 +2138,39 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                 lawa.update(raw_model)
 
             if rank0 and (step % cfg.log_every == 0 or step == target_iterations - 1):
+                step_seconds = time.time() - step_start
+                lr_now = {
+                    "embed_lr": current_optimizer_lr(opt_bundle.embed),
+                    "head_lr": current_optimizer_lr(opt_bundle.head),
+                    "matrix_lr": current_optimizer_lr(opt_bundle.matrix),
+                    "scalar_lr": current_optimizer_lr(opt_bundle.scalar),
+                }
                 print(
                     "[train] step={} loss={:.6f} depth={} step_seconds={:.4f}".format(
                         step,
                         last_train_loss,
                         cfg.model.effective_depth,
-                        time.time() - step_start,
+                        step_seconds,
                     )
+                )
+                append_metrics_event(
+                    metrics_path,
+                    {
+                        "event": "train",
+                        "mode": "benchmark" if cfg.benchmark_only else "train",
+                        "run_id": run_id,
+                        "config_hash": cfg_hash,
+                        "step": step,
+                        "num_steps": completed_steps,
+                        "depth": cfg.model.effective_depth,
+                        "train_loss": last_train_loss,
+                        "step_seconds": step_seconds,
+                        "elapsed_training_seconds": training_elapsed_prior + (time.time() - training_start),
+                        "total_tokens": total_tokens,
+                        "total_tokens_M": total_tokens / 1e6,
+                        "lr_scale": lr_scale(step, target_iterations, cfg.optim),
+                        **lr_now,
+                    },
                 )
 
             if val_tokens is not None and should_run_validation(step, target_iterations, cfg.val_every, cfg.eval_first_step):
@@ -2093,6 +2192,22 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                         print(f"[val] step={step} loss={last_val.val_loss:.6f}")
                     else:
                         print(f"[val] step={step} loss={last_val.val_loss:.6f} bpb={last_val.val_bpb:.6f}")
+                    append_metrics_event(
+                        metrics_path,
+                        {
+                            "event": "val",
+                            "phase": "periodic",
+                            "mode": "benchmark" if cfg.benchmark_only else "train",
+                            "run_id": run_id,
+                            "config_hash": cfg_hash,
+                            "step": step,
+                            "val_loss": last_val.val_loss,
+                            "val_bpb": last_val.val_bpb,
+                            "token_count": last_val.token_count,
+                            "byte_count": last_val.byte_count,
+                            "eval_seconds": last_val.eval_seconds,
+                        },
+                    )
 
             if rank0 and cfg.checkpoint_every > 0 and completed_steps % cfg.checkpoint_every == 0:
                 save_checkpoint(
@@ -2130,6 +2245,22 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     print(f"[val:final] step={last_step} loss={last_val.val_loss:.6f}")
                 else:
                     print(f"[val:final] step={last_step} loss={last_val.val_loss:.6f} bpb={last_val.val_bpb:.6f}")
+                append_metrics_event(
+                    metrics_path,
+                    {
+                        "event": "val",
+                        "phase": "final",
+                        "mode": "benchmark" if cfg.benchmark_only else "train",
+                        "run_id": run_id,
+                        "config_hash": cfg_hash,
+                        "step": last_step,
+                        "val_loss": last_val.val_loss,
+                        "val_bpb": last_val.val_bpb,
+                        "token_count": last_val.token_count,
+                        "byte_count": last_val.byte_count,
+                        "eval_seconds": last_val.eval_seconds,
+                    },
+                )
 
         if lawa is not None and lawa.count > 0:
             lawa.load_into(raw_model)
@@ -2150,6 +2281,22 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                         print(f"[val:lawa] loss={last_val.val_loss:.6f}")
                     else:
                         print(f"[val:lawa] loss={last_val.val_loss:.6f} bpb={last_val.val_bpb:.6f}")
+                    append_metrics_event(
+                        metrics_path,
+                        {
+                            "event": "val",
+                            "phase": "lawa",
+                            "mode": "benchmark" if cfg.benchmark_only else "train",
+                            "run_id": run_id,
+                            "config_hash": cfg_hash,
+                            "step": last_step,
+                            "val_loss": last_val.val_loss,
+                            "val_bpb": last_val.val_bpb,
+                            "token_count": last_val.token_count,
+                            "byte_count": last_val.byte_count,
+                            "eval_seconds": last_val.eval_seconds,
+                        },
+                    )
 
         training_seconds = training_elapsed_prior + (time.time() - training_start)
         num_params = count_parameters(raw_model)
@@ -2245,6 +2392,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
             num_params_M=num_params / 1e6,
             effective_depth=cfg.model.effective_depth,
             checkpoint_path=checkpoint_path,
+            metrics_path=str(metrics_path),
             results_path=str(output_dir / "results.json"),
         )
         session_summary.benchmark = benchmark_stats_from_run(session_summary, last_val)
@@ -2254,6 +2402,24 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
             atomic_write_json(output_dir / "results.json", results_payload)
             atomic_write_json(output_dir / "run_summary.json", dataclasses.asdict(session_summary))
             append_results_tsv(cfg.results_tsv_path, results_payload)
+            append_metrics_event(
+                metrics_path,
+                {
+                    "event": "summary",
+                    "mode": session_summary.mode,
+                    "run_id": run_id,
+                    "config_hash": cfg_hash,
+                    "status": session_summary.status,
+                    "step": session_summary.step,
+                    "num_steps": session_summary.num_steps,
+                    "training_seconds": session_summary.training_seconds,
+                    "total_seconds": session_summary.total_seconds,
+                    "val_loss": session_summary.val_loss,
+                    "val_bpb": session_summary.val_bpb,
+                    "artifact_bytes": 0 if session_summary.export is None else session_summary.export.artifact_bytes,
+                    "results_path": results_payload["results_path"],
+                },
+            )
             emit_metric_lines(results_payload)
         barrier_if_needed()
         return session_summary
@@ -2271,6 +2437,7 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(output_dir / "config.json", config_to_dict(cfg))
+    metrics_path = resolve_metrics_jsonl_path(output_dir, cfg.metrics_jsonl_path)
 
     dist_info = init_distributed()
     try:
@@ -2280,6 +2447,21 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
         setup_seed(cfg.seed + dist_info.rank, deterministic=cfg.deterministic)
         if device.type == "cuda":
             reset_peak_vram_stats(device)
+
+        if rank0:
+            append_metrics_event(
+                metrics_path,
+                {
+                    "event": "run_start",
+                    "mode": "eval",
+                    "run_id": run_id,
+                    "config_hash": cfg_hash,
+                    "output_dir": str(output_dir),
+                    "metrics_path": str(metrics_path),
+                    "load_artifact_path": cfg.load_artifact_path,
+                    "effective_depth": cfg.model.effective_depth,
+                },
+            )
 
         model, manifest, _artifact_dir = load_model_from_artifact(cfg.load_artifact_path, device)
         wrapped_model = maybe_wrap_ddp(model, dist_info, device)
@@ -2297,6 +2479,23 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
             has_leading_space_lut=has_leading_space_lut,
             is_boundary_token_lut=is_boundary_token_lut,
         )
+        if rank0:
+            append_metrics_event(
+                metrics_path,
+                {
+                    "event": "val",
+                    "phase": "eval",
+                    "mode": "eval",
+                    "run_id": run_id,
+                    "config_hash": cfg_hash,
+                    "step": -1,
+                    "val_loss": val_stats.val_loss,
+                    "val_bpb": val_stats.val_bpb,
+                    "token_count": val_stats.token_count,
+                    "byte_count": val_stats.byte_count,
+                    "eval_seconds": val_stats.eval_seconds,
+                },
+            )
         export_stats = ExportStats(
             artifact_dir=str(resolve_artifact_dir(cfg.load_artifact_path)),
             manifest_path=str(resolve_artifact_dir(cfg.load_artifact_path) / "manifest.json"),
@@ -2334,6 +2533,7 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
             num_params_M=count_parameters(model) / 1e6,
             effective_depth=model.cfg.effective_depth,
             checkpoint_path=None,
+            metrics_path=str(metrics_path),
             results_path=str(output_dir / "results.json"),
         )
         if rank0:
@@ -2341,6 +2541,24 @@ def evaluate_exported_artifact(cfg: TrainConfig) -> RunSummary:
             atomic_write_json(output_dir / "results.json", results_payload)
             atomic_write_json(output_dir / "run_summary.json", dataclasses.asdict(summary))
             append_results_tsv(cfg.results_tsv_path, results_payload)
+            append_metrics_event(
+                metrics_path,
+                {
+                    "event": "summary",
+                    "mode": "eval",
+                    "run_id": run_id,
+                    "config_hash": cfg_hash,
+                    "status": summary.status,
+                    "step": summary.step,
+                    "num_steps": summary.num_steps,
+                    "training_seconds": summary.training_seconds,
+                    "total_seconds": summary.total_seconds,
+                    "val_loss": summary.val_loss,
+                    "val_bpb": summary.val_bpb,
+                    "artifact_bytes": 0 if summary.export is None else summary.export.artifact_bytes,
+                    "results_path": results_payload["results_path"],
+                },
+            )
             emit_metric_lines(results_payload)
         barrier_if_needed()
         return summary
@@ -2364,6 +2582,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--results_tsv_path", type=str, default=None)
+    parser.add_argument("--metrics_jsonl_path", type=str, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--iterations", type=int, default=None)
     parser.add_argument("--train_batch_tokens", type=int, default=None)
@@ -2428,6 +2647,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         "output_dir",
         "run_name",
         "results_tsv_path",
+        "metrics_jsonl_path",
         "seed",
         "iterations",
         "train_batch_tokens",

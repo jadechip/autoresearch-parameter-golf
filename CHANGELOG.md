@@ -9,4 +9,5 @@
 - Replaced rough artifact-size estimation with exact submission-bundle accounting over counted code snapshots plus compressed model bytes.
 - Added export manifesting, artifact reload/dequantize/model reconstruction, and end-to-end reload evaluation.
 - Added benchmark reporting, results validation, and submission summary tooling.
+- Added a per-run `metrics.jsonl` stream, a live terminal watcher, a run-comparison viewer, and simple bootstrap / `Makefile` entry points for easier onboarding.
 - Expanded tests across config roundtrip, malformed shards, export/reload parity, validation parity, wall-clock stop, deterministic seeds, resume determinism, tokenizer mismatch, and optional CUDA/DDP/compile/SentencePiece markers.
