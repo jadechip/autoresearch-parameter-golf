@@ -1566,6 +1566,28 @@ def lr_scale(step: int, total_steps: int, cfg: OptimConfig) -> float:
     return 1.0
 
 
+def estimate_effective_total_steps(
+    step: int,
+    *,
+    start_step: int,
+    session_elapsed: float,
+    target_iterations: int,
+    max_wallclock_seconds: float,
+    warmup_steps: int,
+) -> int:
+    if target_iterations <= 0 or max_wallclock_seconds <= 0.0 or session_elapsed <= 0.0:
+        return target_iterations
+    completed_steps = step - start_step
+    calibration_steps = max(32, warmup_steps * 2)
+    if completed_steps < calibration_steps:
+        return target_iterations
+    estimated_session_steps = max(
+        completed_steps,
+        int(round(completed_steps * max_wallclock_seconds / session_elapsed)),
+    )
+    return min(target_iterations, start_step + estimated_session_steps)
+
+
 def set_optimizer_lrs(bundle: OptimBundle, step: int, total_steps: int, optim_cfg: OptimConfig) -> None:
     scale = lr_scale(step, total_steps, optim_cfg)
     for opt in bundle.all():
@@ -2324,6 +2346,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
         last_val_step: int | None = None
 
         target_iterations = cfg.iterations if not cfg.benchmark_only else min(cfg.iterations, cfg.benchmark_train_steps)
+        schedule_total_steps = target_iterations
         for step in range(start_step, target_iterations):
             session_elapsed = time.time() - training_start
             if session_elapsed >= cfg.max_wallclock_seconds:
@@ -2331,9 +2354,19 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     print(f"[train] stopping early at step {step} due to max_wallclock_seconds={cfg.max_wallclock_seconds}")
                 break
 
+            if schedule_total_steps == target_iterations:
+                schedule_total_steps = estimate_effective_total_steps(
+                    step,
+                    start_step=start_step,
+                    session_elapsed=session_elapsed,
+                    target_iterations=target_iterations,
+                    max_wallclock_seconds=cfg.max_wallclock_seconds,
+                    warmup_steps=cfg.optim.warmup_steps,
+                )
+
             step_start = time.time()
             raw_model.set_global_step(step)
-            set_optimizer_lrs(opt_bundle, step, target_iterations, cfg.optim)
+            set_optimizer_lrs(opt_bundle, step, schedule_total_steps, cfg.optim)
             for opt in opt_bundle.all():
                 opt.zero_grad(set_to_none=True)
 
@@ -2358,7 +2391,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
             completed_steps = step + 1
             last_step = step
 
-            if lawa is not None and step >= max(0, target_iterations - cfg.lawa_last_n_steps):
+            if lawa is not None and step >= max(0, schedule_total_steps - cfg.lawa_last_n_steps):
                 lawa.update(raw_model)
 
             if rank0 and (step % cfg.log_every == 0 or step == target_iterations - 1):
@@ -2392,7 +2425,8 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                         "elapsed_training_seconds": training_elapsed_prior + (time.time() - training_start),
                         "total_tokens": total_tokens,
                         "total_tokens_M": total_tokens / 1e6,
-                        "lr_scale": lr_scale(step, target_iterations, cfg.optim),
+                        "lr_scale": lr_scale(step, schedule_total_steps, cfg.optim),
+                        "lr_total_steps": schedule_total_steps,
                         **lr_now,
                     },
                 )
@@ -2404,7 +2438,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     elapsed_training_seconds=training_elapsed_prior + (time.time() - training_start),
                     total_tokens=total_tokens,
                     total_tokens_M=total_tokens / 1e6,
-                    lr_scale_value=lr_scale(step, target_iterations, cfg.optim),
+                    lr_scale_value=lr_scale(step, schedule_total_steps, cfg.optim),
                     lr_now=lr_now,
                 )
 
