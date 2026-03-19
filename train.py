@@ -400,7 +400,7 @@ def widen_recurrent_mlp_on_deep_tail(model_cfg: ModelConfig) -> None:
         return
     if model_cfg.fake_quant_start_step != 20:
         return
-    model_cfg.shared_mlp_hidden_bonus = model_cfg.d_model // 4
+    model_cfg.shared_mlp_hidden_bonus = model_cfg.d_model // 2
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
