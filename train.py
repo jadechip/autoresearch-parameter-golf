@@ -338,6 +338,18 @@ def rebalance_shared_layers_vs_loops(model_cfg: ModelConfig) -> None:
     model_cfg.recurrence_loops = target_loops
 
 
+def expand_adapter_capacity(model_cfg: ModelConfig) -> None:
+    if model_cfg.shared_layers < model_cfg.recurrence_loops:
+        return
+    if model_cfg.shared_layers * model_cfg.recurrence_loops < 8:
+        return
+    if model_cfg.adapter_rank != 4 or set(model_cfg.adapter_targets) != {"attn_out", "mlp_out"}:
+        return
+    model_cfg.adapter_rank = 8
+    model_cfg.adapter_alpha = 16.0
+    model_cfg.adapter_targets = ALLOWED_ADAPTER_TARGETS
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2913,6 +2925,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     if args.evaluate_only:
         cfg.evaluate_only = True
     rebalance_shared_layers_vs_loops(cfg.model)
+    expand_adapter_capacity(cfg.model)
     return cfg
 
 
