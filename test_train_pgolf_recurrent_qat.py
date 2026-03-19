@@ -27,6 +27,14 @@ assert _AUTORESEARCH_STATE_SPEC is not None and _AUTORESEARCH_STATE_SPEC.loader 
 autoresearch_state = importlib.util.module_from_spec(_AUTORESEARCH_STATE_SPEC)
 _AUTORESEARCH_STATE_SPEC.loader.exec_module(autoresearch_state)
 
+_WATCH_CODEX_AUTORESEARCH_SPEC = importlib.util.spec_from_file_location(
+    "watch_codex_autoresearch",
+    Path(__file__).parent / "scripts" / "watch_codex_autoresearch.py",
+)
+assert _WATCH_CODEX_AUTORESEARCH_SPEC is not None and _WATCH_CODEX_AUTORESEARCH_SPEC.loader is not None
+watch_codex_autoresearch = importlib.util.module_from_spec(_WATCH_CODEX_AUTORESEARCH_SPEC)
+_WATCH_CODEX_AUTORESEARCH_SPEC.loader.exec_module(watch_codex_autoresearch)
+
 
 class FakeTokenizer:
     def __init__(self, vocab_size: int = 6):
@@ -634,6 +642,43 @@ def test_compare_runs_render_rows() -> None:
     assert "run_b" in text
     assert "1.700000" in text
     assert "artifact_MB" in text
+
+
+def test_watch_codex_autoresearch_snapshot_and_once_script(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".autoresearch"
+    runs_dir = state_dir / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "activity.log").write_text(
+        "2026-03-19T18:16:51Z codex_loop_start prompt_file=/tmp/prompt.md max_iterations=0 sleep_seconds=2\n"
+        "2026-03-19T18:16:56Z iteration_start iteration=1 log=/tmp/codex-iteration-1.log\n",
+        encoding="utf-8",
+    )
+    (runs_dir / "codex-iteration-20260319-181656.log").write_text(
+        "iteration 1 body\nthinking...\n",
+        encoding="utf-8",
+    )
+    (runs_dir / "codex-iteration-20260319-181656.last.txt").write_text(
+        "completed one iteration\n",
+        encoding="utf-8",
+    )
+
+    snapshot = watch_codex_autoresearch.render_snapshot(state_dir, history_lines=10)
+    text = "\n".join(snapshot)
+    assert "codex-loop watcher" in text
+    assert "iteration_start iteration=1" in text
+    assert "completed one iteration" in text
+    assert "Current Iteration Log:" in text
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/watch_codex_autoresearch.py", "--state_dir", str(state_dir), "--once"],
+        cwd=Path(__file__).parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "codex-loop watcher" in proc.stdout
+    assert "iteration 1 body" in proc.stdout
+    assert "completed one iteration" in proc.stdout
 
 
 def test_autoresearch_index_script_updates_latest_and_best(tmp_path: Path) -> None:

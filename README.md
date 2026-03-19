@@ -116,6 +116,12 @@ Loop logs land in:
 - `./.autoresearch/errors.log`
 - `./.autoresearch/runs/`
 
+For a read-only live tail that follows the newest iteration log:
+
+```bash
+bash scripts/watch_codex_autoresearch.sh
+```
+
 ### 2. Interactive Mode: Start Codex In The Repo Root
 
 Codex should run on the same machine as the training job so it can edit the repo and launch experiments locally.

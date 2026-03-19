@@ -97,6 +97,12 @@ The loop writes additional local state under:
 - `./.autoresearch/errors.log`
 - `./.autoresearch/runs/`
 
+For a read-only live tail of the supervisor plus the newest iteration log:
+
+```bash
+bash scripts/watch_codex_autoresearch.sh
+```
+
 7. Read results from:
 
 - `./runs/autoresearch_5090/index/latest.json`
