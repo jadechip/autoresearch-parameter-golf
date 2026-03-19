@@ -101,7 +101,7 @@ class ModelConfig:
     adapter_targets: tuple[str, ...] = ("attn_out", "mlp_out")
     qk_gain_init: float = 1.0
     fake_quant_during_train: bool = True
-    fake_quant_start_step: int = 50
+    fake_quant_start_step: int = 0
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
 
