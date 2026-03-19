@@ -65,7 +65,9 @@ While the run is active, the monitor should show a live dashboard with fields li
 - `Status: running`
 - `Last Train`
 - `Last Val`
-- small ASCII graphs for `train_loss`, `matrix_lr`, `val_bpb`, and timing
+- multi-row terminal plots for `train_loss`, `matrix_lr`, `val_bpb`, and throughput
+- a recent-run history plot so you can see experiment progress across changes
+- a recent-events pane with the latest train/val/summary updates
 
 If your checkout is older and `latest.json` does not exist until the run finishes, point the watcher directly at the run directory instead:
 
@@ -162,7 +164,8 @@ uv run pgolf-monitor ./runs/autoresearch_5090/index/latest.json
 This opens a full-screen terminal UI over SSH/tmux with:
 
 - current status and latest metrics
-- small live charts for loss, bpb, LR, and throughput
+- live multi-row plots for loss, bpb, LR, and throughput
+- a recent-run history section for completed experiments
 - a recent-events pane
 - `q` to quit
 

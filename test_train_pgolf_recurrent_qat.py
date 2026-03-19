@@ -525,6 +525,12 @@ def test_watch_run_tui_lines_include_recent_events_and_tokens_per_second(tmp_pat
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / "metrics.jsonl"
+    (tmp_path / "results.tsv").write_text(
+        "\t".join(["run_id", "val_bpb", "artifact_bytes", "training_seconds"]) + "\n"
+        + "\t".join(["baseline", "1.950000", "5200000", "495.0"]) + "\n"
+        + "\t".join(["candidate", "1.870000", "5300000", "496.0"]) + "\n",
+        encoding="utf-8",
+    )
     events = [
         {"schema_version": mod.METRICS_STREAM_VERSION, "event": "run_start", "run_id": "demo", "mode": "train"},
         {"schema_version": mod.METRICS_STREAM_VERSION, "event": "train", "step": 3, "train_loss": 4.0, "matrix_lr": 0.01, "step_seconds": 1.0, "total_tokens": 128, "elapsed_training_seconds": 2.0},
@@ -535,7 +541,9 @@ def test_watch_run_tui_lines_include_recent_events_and_tokens_per_second(tmp_pat
     text = "\n".join(lines)
     assert "autoresearch-parameter-golf monitor" in text
     assert "Tok/s:" in text
+    assert "Recent Run History" in text
     assert "Recent Events" in text
+    assert "run_id=candidate" in text
     assert "val/final" in text
 
 
