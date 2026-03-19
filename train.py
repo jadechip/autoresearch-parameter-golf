@@ -350,6 +350,16 @@ def expand_adapter_capacity(model_cfg: ModelConfig) -> None:
     model_cfg.adapter_targets = ALLOWED_ADAPTER_TARGETS
 
 
+def move_short_budget_fake_quant_to_warmup_boundary(cfg: TrainConfig) -> None:
+    if cfg.max_wallclock_seconds > 300.0:
+        return
+    if not cfg.model.fake_quant_during_train or cfg.model.fake_quant_start_step != 50:
+        return
+    if cfg.optim.warmup_steps != 20:
+        return
+    cfg.model.fake_quant_start_step = cfg.optim.warmup_steps
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2926,6 +2936,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         cfg.evaluate_only = True
     rebalance_shared_layers_vs_loops(cfg.model)
     expand_adapter_capacity(cfg.model)
+    move_short_budget_fake_quant_to_warmup_boundary(cfg)
     return cfg
 
 
