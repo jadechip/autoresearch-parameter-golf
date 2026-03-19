@@ -403,6 +403,22 @@ def widen_recurrent_mlp_on_deep_tail(model_cfg: ModelConfig) -> None:
     model_cfg.shared_mlp_hidden_bonus = model_cfg.d_model // 4
 
 
+def reallocate_final_recurrent_layer_into_tail(model_cfg: ModelConfig) -> None:
+    if model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 7:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model // 4:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if model_cfg.fake_quant_start_step != 20:
+        return
+    total_depth = model_cfg.effective_depth
+    model_cfg.shared_layers = 0
+    model_cfg.recurrence_loops = 0
+    model_cfg.shared_mlp_hidden_bonus = 0
+    model_cfg.tail_layers = total_depth - model_cfg.stem_layers
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2993,6 +3009,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     reallocate_third_shared_layer_into_tail(cfg.model)
     move_fake_quant_to_warmup_boundary_on_deep_tail(cfg.model)
     widen_recurrent_mlp_on_deep_tail(cfg.model)
+    reallocate_final_recurrent_layer_into_tail(cfg.model)
     return cfg
 
 
