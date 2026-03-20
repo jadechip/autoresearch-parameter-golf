@@ -103,6 +103,7 @@ class ModelConfig:
     qk_gain_init: float = 1.0
     fake_quant_during_train: bool = True
     fake_quant_start_step: int = 50
+    mlp_fake_quant_bits: int = 8
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
 
@@ -498,6 +499,31 @@ def use_int6_mlp_export_on_retuned_stemless_deep_tail(cfg: TrainConfig) -> None:
         return
     cfg.quant.low_bit_bits = 6
     cfg.quant.low_bit_name_patterns = ("mlp.fc.weight", "mlp.proj.weight")
+
+
+def align_mlp_fake_quant_to_int6_export_on_retuned_stemless_deep_tail(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 8:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != (model_cfg.d_model * 3) // 8:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != 20:
+        return
+    if model_cfg.mlp_fake_quant_bits != 8:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    model_cfg.mlp_fake_quant_bits = 6
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -1218,14 +1244,15 @@ def apply_rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     return (x * cos_full) + (rotate_half(x) * sin_full)
 
 
-def per_row_fake_quant_ste(weight: Tensor, eps: float = 1e-8) -> Tensor:
+def per_row_fake_quant_ste(weight: Tensor, bits: int = 8, eps: float = 1e-8) -> Tensor:
+    qmax = float((1 << (bits - 1)) - 1)
     if weight.ndim != 2:
-        scale = weight.detach().abs().amax().clamp_min(eps) / 127.0
-        q = torch.clamp(torch.round(weight / scale), -127, 127)
+        scale = weight.detach().abs().amax().clamp_min(eps) / qmax
+        q = torch.clamp(torch.round(weight / scale), -qmax, qmax)
         dq = q * scale
         return weight + (dq - weight).detach()
-    scale = weight.detach().abs().amax(dim=1, keepdim=True).clamp_min(eps) / 127.0
-    q = torch.clamp(torch.round(weight / scale), -127, 127)
+    scale = weight.detach().abs().amax(dim=1, keepdim=True).clamp_min(eps) / qmax
+    q = torch.clamp(torch.round(weight / scale), -qmax, qmax)
     dq = q * scale
     return weight + (dq - weight).detach()
 
@@ -1239,6 +1266,7 @@ class FakeQuantLinear(nn.Module):
         bias: bool = False,
         fake_quant_during_train: bool = True,
         fake_quant_start_step: int = 0,
+        fake_quant_bits: int = 8,
         num_adapter_slots: int = 0,
         adapter_rank: int = 0,
         adapter_alpha: float = 1.0,
@@ -1249,6 +1277,7 @@ class FakeQuantLinear(nn.Module):
         self.out_features = out_features
         self.fake_quant_during_train = fake_quant_during_train
         self.fake_quant_start_step = fake_quant_start_step
+        self.fake_quant_bits = fake_quant_bits
         self.register_buffer("global_step", torch.zeros((), dtype=torch.long), persistent=False)
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
@@ -1281,7 +1310,7 @@ class FakeQuantLinear(nn.Module):
 
     def _effective_weight(self) -> Tensor:
         if self.training and self.fake_quant_during_train and int(self.global_step.item()) >= self.fake_quant_start_step:
-            return per_row_fake_quant_ste(self.weight)
+            return per_row_fake_quant_ste(self.weight, bits=self.fake_quant_bits)
         return self.weight
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
@@ -1395,6 +1424,7 @@ class ReLU2MLP(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
+            fake_quant_bits=cfg.mlp_fake_quant_bits,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "mlp_in") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -1405,6 +1435,7 @@ class ReLU2MLP(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
+            fake_quant_bits=cfg.mlp_fake_quant_bits,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "mlp_out") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -2307,6 +2338,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("seq_len must be positive")
     if cfg.model.shared_mlp_hidden_bonus < 0:
         raise ConfigError("shared_mlp_hidden_bonus must be >= 0")
+    if cfg.model.mlp_fake_quant_bits < 2 or cfg.model.mlp_fake_quant_bits > 8:
+        raise ConfigError("mlp_fake_quant_bits must be in [2, 8]")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.iterations <= 0:
@@ -3146,6 +3179,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     shift_accepted_deep_tail_stem_into_tail(cfg)
     retune_shifted_deep_tail_width_and_warmdown(cfg)
     use_int6_mlp_export_on_retuned_stemless_deep_tail(cfg)
+    align_mlp_fake_quant_to_int6_export_on_retuned_stemless_deep_tail(cfg)
     return cfg
 
 
