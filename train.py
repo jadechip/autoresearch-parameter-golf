@@ -89,7 +89,6 @@ class ModelConfig:
     num_kv_heads: int = 4
     mlp_mult: int = 2
     shared_mlp_hidden_bonus: int = 0
-    non_recurrent_mlp_hidden_bonus: int = -1
     rope_base: float = 10_000.0
     logit_softcap: float = 30.0
     tie_embeddings: bool = True
@@ -499,31 +498,6 @@ def use_int6_mlp_export_on_retuned_stemless_deep_tail(cfg: TrainConfig) -> None:
         return
     cfg.quant.low_bit_bits = 6
     cfg.quant.low_bit_name_patterns = ("mlp.fc.weight", "mlp.proj.weight")
-
-
-def spend_int6_mlp_savings_on_tail_mlp_width(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 8:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != (model_cfg.d_model * 3) // 8:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus not in {-1, model_cfg.d_model // 2}:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != 20:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    model_cfg.non_recurrent_mlp_hidden_bonus = (model_cfg.d_model * 3) // 4
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -1480,9 +1454,7 @@ class RecurrentGPT(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
-        non_recurrent_hidden_bonus = (
-            cfg.d_model // 2 if cfg.non_recurrent_mlp_hidden_bonus < 0 else cfg.non_recurrent_mlp_hidden_bonus
-        )
+        non_recurrent_hidden_bonus = cfg.d_model // 2
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
         self.stem = nn.ModuleList(
@@ -2335,8 +2307,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("seq_len must be positive")
     if cfg.model.shared_mlp_hidden_bonus < 0:
         raise ConfigError("shared_mlp_hidden_bonus must be >= 0")
-    if cfg.model.non_recurrent_mlp_hidden_bonus < -1:
-        raise ConfigError("non_recurrent_mlp_hidden_bonus must be >= -1")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.iterations <= 0:
@@ -3176,7 +3146,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     shift_accepted_deep_tail_stem_into_tail(cfg)
     retune_shifted_deep_tail_width_and_warmdown(cfg)
     use_int6_mlp_export_on_retuned_stemless_deep_tail(cfg)
-    spend_int6_mlp_savings_on_tail_mlp_width(cfg)
     return cfg
 
 
