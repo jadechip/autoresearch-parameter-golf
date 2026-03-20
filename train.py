@@ -472,6 +472,27 @@ def retune_shifted_deep_tail_width_and_warmdown(cfg: TrainConfig) -> None:
     cfg.optim.warmdown_steps = 80
 
 
+def extend_context_on_accepted_stemless_deep_tail(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.seq_len != 512:
+        return
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 8:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != (model_cfg.d_model * 3) // 8:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != 20:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    model_cfg.seq_len = 1024
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -3108,6 +3129,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg)
     shift_accepted_deep_tail_stem_into_tail(cfg)
     retune_shifted_deep_tail_width_and_warmdown(cfg)
+    extend_context_on_accepted_stemless_deep_tail(cfg)
     return cfg
 
 
