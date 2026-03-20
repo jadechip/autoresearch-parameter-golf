@@ -103,7 +103,6 @@ class ModelConfig:
     qk_gain_init: float = 1.0
     fake_quant_during_train: bool = True
     fake_quant_start_step: int = 50
-    fake_quant_clip_percentile: float = 100.0
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
 
@@ -432,23 +431,6 @@ def modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg: TrainConfig) -> Non
     if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
         return
     model_cfg.shared_mlp_hidden_bonus = (model_cfg.d_model * 7) // 16
-
-
-def align_train_fake_quant_to_export_clip_on_current_deep_tail(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 7:
-        return
-    if model_cfg.shared_mlp_hidden_bonus != (model_cfg.d_model * 7) // 16:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if model_cfg.fake_quant_start_step != 20:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if not math.isclose(model_cfg.fake_quant_clip_percentile, 100.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    model_cfg.fake_quant_clip_percentile = cfg.quant.clip_percentile
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -1169,24 +1151,14 @@ def apply_rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     return (x * cos_full) + (rotate_half(x) * sin_full)
 
 
-def per_row_fake_quant_ste(weight: Tensor, clip_percentile: float = 100.0, eps: float = 1e-8) -> Tensor:
-    abs_weight = weight.detach().abs()
-    if clip_percentile >= 100.0:
-        clip = abs_weight.amax() if weight.ndim != 2 else abs_weight.amax(dim=1, keepdim=True)
-    else:
-        q_level = clip_percentile / 100.0
-        if weight.ndim != 2:
-            clip = torch.quantile(abs_weight.flatten(), q_level) if abs_weight.numel() else torch.tensor(0.0, device=weight.device)
-        else:
-            clip = (
-                torch.quantile(abs_weight, q_level, dim=1).unsqueeze(1)
-                if abs_weight.numel()
-                else torch.empty((weight.shape[0], 1), device=weight.device, dtype=weight.dtype)
-            )
-    clip = clip.clamp_min(eps)
-    scale = clip / 127.0
-    clipped = torch.clamp(weight, min=-clip, max=clip)
-    q = torch.clamp(torch.round(clipped / scale), -127, 127)
+def per_row_fake_quant_ste(weight: Tensor, eps: float = 1e-8) -> Tensor:
+    if weight.ndim != 2:
+        scale = weight.detach().abs().amax().clamp_min(eps) / 127.0
+        q = torch.clamp(torch.round(weight / scale), -127, 127)
+        dq = q * scale
+        return weight + (dq - weight).detach()
+    scale = weight.detach().abs().amax(dim=1, keepdim=True).clamp_min(eps) / 127.0
+    q = torch.clamp(torch.round(weight / scale), -127, 127)
     dq = q * scale
     return weight + (dq - weight).detach()
 
@@ -1200,7 +1172,6 @@ class FakeQuantLinear(nn.Module):
         bias: bool = False,
         fake_quant_during_train: bool = True,
         fake_quant_start_step: int = 0,
-        fake_quant_clip_percentile: float = 100.0,
         num_adapter_slots: int = 0,
         adapter_rank: int = 0,
         adapter_alpha: float = 1.0,
@@ -1211,7 +1182,6 @@ class FakeQuantLinear(nn.Module):
         self.out_features = out_features
         self.fake_quant_during_train = fake_quant_during_train
         self.fake_quant_start_step = fake_quant_start_step
-        self.fake_quant_clip_percentile = fake_quant_clip_percentile
         self.register_buffer("global_step", torch.zeros((), dtype=torch.long), persistent=False)
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
@@ -1244,7 +1214,7 @@ class FakeQuantLinear(nn.Module):
 
     def _effective_weight(self) -> Tensor:
         if self.training and self.fake_quant_during_train and int(self.global_step.item()) >= self.fake_quant_start_step:
-            return per_row_fake_quant_ste(self.weight, clip_percentile=self.fake_quant_clip_percentile)
+            return per_row_fake_quant_ste(self.weight)
         return self.weight
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
@@ -1281,7 +1251,6 @@ class GroupedQueryAttention(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
-            fake_quant_clip_percentile=cfg.fake_quant_clip_percentile,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "q") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -1292,7 +1261,6 @@ class GroupedQueryAttention(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
-            fake_quant_clip_percentile=cfg.fake_quant_clip_percentile,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "k") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -1303,7 +1271,6 @@ class GroupedQueryAttention(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
-            fake_quant_clip_percentile=cfg.fake_quant_clip_percentile,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "v") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -1314,7 +1281,6 @@ class GroupedQueryAttention(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
-            fake_quant_clip_percentile=cfg.fake_quant_clip_percentile,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "attn_out") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -1362,7 +1328,6 @@ class ReLU2MLP(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
-            fake_quant_clip_percentile=cfg.fake_quant_clip_percentile,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "mlp_in") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -1373,7 +1338,6 @@ class ReLU2MLP(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
-            fake_quant_clip_percentile=cfg.fake_quant_clip_percentile,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "mlp_out") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -1449,7 +1413,6 @@ class RecurrentGPT(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
-            fake_quant_clip_percentile=cfg.fake_quant_clip_percentile,
         )
         self._reset_parameters()
 
@@ -2278,8 +2241,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("val_every must be >= 0")
     if cfg.quant.clip_percentile <= 0.0 or cfg.quant.clip_percentile > 100.0:
         raise ConfigError("quant.clip_percentile must be in (0, 100]")
-    if cfg.model.fake_quant_clip_percentile <= 0.0 or cfg.model.fake_quant_clip_percentile > 100.0:
-        raise ConfigError("fake_quant_clip_percentile must be in (0, 100]")
     invalid_targets = sorted(set(cfg.model.adapter_targets) - set(ALLOWED_ADAPTER_TARGETS))
     if invalid_targets:
         raise ConfigError(f"invalid adapter_targets: {invalid_targets}")
@@ -3098,7 +3059,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     widen_recurrent_mlp_on_deep_tail(cfg.model)
     tighten_export_clip_on_accepted_deep_tail(cfg)
     modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg)
-    align_train_fake_quant_to_export_clip_on_current_deep_tail(cfg)
     return cfg
 
 
