@@ -1608,7 +1608,9 @@ def estimate_effective_total_steps(
     if target_iterations <= 0 or max_wallclock_seconds <= 0.0 or session_elapsed <= 0.0:
         return target_iterations
     completed_steps = step - start_step
-    calibration_steps = max(32, warmup_steps * 2)
+    # Wait for more steady-state training before estimating the 5-minute budget;
+    # early startup overhead can otherwise bias the cosine schedule to decay too soon.
+    calibration_steps = max(80, warmup_steps * 4)
     if completed_steps < calibration_steps:
         return target_iterations
     estimated_session_steps = max(
