@@ -430,7 +430,7 @@ def modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg: TrainConfig) -> Non
         return
     if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
         return
-    model_cfg.shared_mlp_hidden_bonus = (model_cfg.d_model * 7) // 16
+    model_cfg.shared_mlp_hidden_bonus = (model_cfg.d_model * 3) // 8
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
