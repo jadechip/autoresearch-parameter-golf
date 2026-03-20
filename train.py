@@ -1634,12 +1634,18 @@ def tensor_nbytes(tensor: Tensor) -> int:
     return int(tensor.numel()) * int(tensor.element_size())
 
 
-def _keep_float_tensor(name: str, tensor: Tensor, cfg: QuantConfig, passthrough_orig_dtypes: dict[str, str]) -> Tensor:
-    if any(pattern in name for pattern in cfg.keep_float_name_patterns):
-        return tensor.float().contiguous()
-    if tensor.dtype in {torch.float32, torch.bfloat16}:
+def _store_passthrough_float(name: str, tensor: Tensor, cfg: QuantConfig, passthrough_orig_dtypes: dict[str, str]) -> Tensor:
+    if tensor.dtype != cfg.keep_float_store_dtype:
         passthrough_orig_dtypes[name] = str(tensor.dtype).removeprefix("torch.")
         return tensor.to(dtype=cfg.keep_float_store_dtype).contiguous()
+    return tensor.contiguous()
+
+
+def _keep_float_tensor(name: str, tensor: Tensor, cfg: QuantConfig, passthrough_orig_dtypes: dict[str, str]) -> Tensor:
+    if any(pattern in name for pattern in cfg.keep_float_name_patterns):
+        return _store_passthrough_float(name, tensor, cfg, passthrough_orig_dtypes)
+    if tensor.dtype in {torch.float32, torch.bfloat16}:
+        return _store_passthrough_float(name, tensor, cfg, passthrough_orig_dtypes)
     return tensor
 
 
