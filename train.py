@@ -1388,6 +1388,17 @@ class RecurrentGPT(nn.Module):
         super().__init__()
         self.cfg = cfg
         non_recurrent_hidden_bonus = cfg.d_model // 2
+        if (
+            cfg.shared_layers == 1
+            and cfg.recurrence_loops == 2
+            and cfg.tail_layers == 7
+            and cfg.shared_mlp_hidden_bonus == (cfg.d_model * 7) // 16
+            and cfg.adapter_rank == 8
+            and tuple(cfg.adapter_targets) == ALLOWED_ADAPTER_TARGETS
+            and cfg.fake_quant_start_step == 20
+        ):
+            # Keep the widened deep-tail line inside the soft artifact band by matching stem/tail MLP width.
+            non_recurrent_hidden_bonus = (cfg.d_model * 7) // 16
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
         self.stem = nn.ModuleList(
