@@ -1,0 +1,88 @@
+{
+  "accepted_artifact_bytes": 8891640,
+  "accepted_commit": "2cf50cedf9e7904f2c5733b32d936599e5856fad",
+  "accepted_commit_short": "2cf50ce",
+  "accepted_results_path": "runs/autoresearch_5090/runs/ar5090-20260320-200930/results.json",
+  "accepted_run_id": "ar5090-20260320-200930",
+  "accepted_val_bpb": 1.6501947707012221,
+  "baseline_artifact_bytes": 9185730,
+  "baseline_results_path": "/workspace/autoresearch-parameter-golf-ralph/runs/autoresearch_5090/runs/ar5090-20260319-173949/results.json",
+  "baseline_run_id": "ar5090-20260319-173949",
+  "baseline_val_bpb": 1.7116757387579924,
+  "created_at_unix": 1773944166.3701816,
+  "current_branch": "autoresearch/20260319-181724",
+  "current_experiment": null,
+  "latest_artifact_bytes": 8885974,
+  "latest_decision": "reverted",
+  "latest_results_path": "/workspace/autoresearch-parameter-golf-ralph/runs/autoresearch_5090/runs/ar5090-20260320-224521/results.json",
+  "latest_run_id": "ar5090-20260320-224521",
+  "latest_status": "success",
+  "latest_val_bpb": 1.6655153665343005,
+  "repo_root": "/workspace/autoresearch-parameter-golf-ralph",
+  "schema_version": "pgolf.autoresearch_session.v1",
+  "search_policy": {
+    "artifact_target_bytes_max": 12000000,
+    "artifact_target_bytes_min": 7000000,
+    "do_not_overweight": [
+      "Do not cargo-cult public PRs.",
+      "Treat these as priors, not recipes.",
+      "Stay inside the current baseline family unless measurements justify a bigger change."
+    ],
+    "external_priors": [
+      "Top public competitors often improve the baseline family rather than replacing it.",
+      "Wider MLPs, often around 3x, appear frequently in strong runs.",
+      "Mixed lower-bit quantization on large matrices appears promising.",
+      "FP16 tied embedding passthrough appears promising.",
+      "Lower LR, higher Muon momentum, and longer warmdown appear promising.",
+      "Sliding-window evaluation appears in strong public runs, but only use it if it stays competition-valid."
+    ],
+    "max_consecutive_losing_micro_experiments": 3,
+    "min_meaningful_bpb_gain": 0.001,
+    "next_priority_axes": [
+      "mlp_mult",
+      "precision policy for embeddings/head",
+      "lower-bit or mixed-bit matrix quantization feasibility",
+      "optimizer schedule: lower LR / higher Muon momentum / longer warmdown",
+      "fake_quant_start_step and clip_percentile"
+    ],
+    "structural_axes": [
+      "d_model",
+      "shared_layers_vs_recurrence_loops",
+      "tail_layers",
+      "mlp_mult",
+      "adapter_rank_and_targets",
+      "fake_quant_start_step_and_clip_percentile"
+    ],
+    "temporary_mode": {
+      "active": true,
+      "disallowed_micro_axes": [
+        "matrix_lr_only",
+        "warmdown_only",
+        "clip_percentile_only",
+        "adapter_alpha_only",
+        "tiny hidden bonus retunes",
+        "single-constant edits without a larger hypothesis"
+      ],
+      "goal": "Try a small number of larger, leaderboard-informed jumps before H100 rehearsal.",
+      "max_iterations": 5,
+      "name": "structural_jump_phase",
+      "priority_axes": [
+        "mlp_mult with materially wider MLP, including ~3x if feasible",
+        "fp16 tied embedding or embedding/head precision passthrough",
+        "optimizer schedule retune as a coherent bundle: lower LR, higher Muon momentum, longer warmdown",
+        "int6 or mixed low-bit quantization on large matrices if it can be implemented cleanly",
+        "sliding-window evaluation only if it remains competition-valid",
+        "seq_len toward 2048 if feasible under the budget"
+      ],
+      "rules": [
+        "Prefer substantial changes over neighborhood hill-climbing.",
+        "Do not use this phase for tiny LR-only, clip-only, adapter-alpha-only, or hidden-bonus-only tweaks.",
+        "Each experiment should test a major hypothesis with plausible upside beyond noise.",
+        "If no meaningful win appears after max_iterations, return to the accepted best and resume normal search."
+      ]
+    }
+  },
+  "state_dir": "/workspace/autoresearch-parameter-golf-ralph/.autoresearch",
+  "status": "ready",
+  "updated_at_unix": 1774047348.165512
+}
