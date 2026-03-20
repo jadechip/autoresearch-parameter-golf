@@ -418,7 +418,7 @@ def tighten_export_clip_on_accepted_deep_tail(cfg: TrainConfig) -> None:
     cfg.quant.clip_percentile = 96.5
 
 
-def retune_recurrent_mlp_on_wallclock_deep_tail(cfg: TrainConfig) -> None:
+def modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 7:
         return
@@ -430,7 +430,7 @@ def retune_recurrent_mlp_on_wallclock_deep_tail(cfg: TrainConfig) -> None:
         return
     if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
         return
-    model_cfg.shared_mlp_hidden_bonus = (model_cfg.d_model * 13) // 32
+    model_cfg.shared_mlp_hidden_bonus = (model_cfg.d_model * 7) // 16
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -3058,7 +3058,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     move_fake_quant_to_warmup_boundary_on_deep_tail(cfg.model)
     widen_recurrent_mlp_on_deep_tail(cfg.model)
     tighten_export_clip_on_accepted_deep_tail(cfg)
-    retune_recurrent_mlp_on_wallclock_deep_tail(cfg)
+    modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg)
     return cfg
 
 
