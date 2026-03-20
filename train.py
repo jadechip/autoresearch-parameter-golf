@@ -89,7 +89,6 @@ class ModelConfig:
     num_kv_heads: int = 4
     mlp_mult: int = 2
     shared_mlp_hidden_bonus: int = 0
-    non_recurrent_mlp_hidden_bonus: int = 0
     rope_base: float = 10_000.0
     logit_softcap: float = 30.0
     tie_embeddings: bool = True
@@ -432,24 +431,6 @@ def modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg: TrainConfig) -> Non
     if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
         return
     model_cfg.shared_mlp_hidden_bonus = (model_cfg.d_model * 7) // 16
-
-
-def slightly_widen_non_recurrent_mlp_on_later_calibrated_deep_tail(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    target_bonus = (model_cfg.d_model * 17) // 32
-    if model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 7:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != (model_cfg.d_model * 7) // 16:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus not in {0, model_cfg.d_model // 2, target_bonus}:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if model_cfg.fake_quant_start_step != 20:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    model_cfg.non_recurrent_mlp_hidden_bonus = target_bonus
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -1406,7 +1387,7 @@ class RecurrentGPT(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
-        non_recurrent_hidden_bonus = cfg.non_recurrent_mlp_hidden_bonus or (cfg.d_model // 2)
+        non_recurrent_hidden_bonus = cfg.d_model // 2
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
         self.stem = nn.ModuleList(
@@ -2252,8 +2233,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("seq_len must be positive")
     if cfg.model.shared_mlp_hidden_bonus < 0:
         raise ConfigError("shared_mlp_hidden_bonus must be >= 0")
-    if cfg.model.non_recurrent_mlp_hidden_bonus < 0:
-        raise ConfigError("non_recurrent_mlp_hidden_bonus must be >= 0")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.iterations <= 0:
@@ -3088,7 +3067,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     widen_recurrent_mlp_on_deep_tail(cfg.model)
     tighten_export_clip_on_accepted_deep_tail(cfg)
     modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg)
-    slightly_widen_non_recurrent_mlp_on_later_calibrated_deep_tail(cfg)
     return cfg
 
 
