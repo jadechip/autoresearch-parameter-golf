@@ -1218,14 +1218,31 @@ def apply_rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     return (x * cos_full) + (rotate_half(x) * sin_full)
 
 
-def per_row_fake_quant_ste(weight: Tensor, eps: float = 1e-8) -> Tensor:
+def qmax_for_bits(bits: int) -> int:
+    return (1 << (bits - 1)) - 1
+
+
+def per_row_fake_quant_ste(weight: Tensor, *, bits: int = 8, clip_percentile: float = 100.0, eps: float = 1e-8) -> Tensor:
+    qmax = float(qmax_for_bits(bits))
+    q_level = clip_percentile / 100.0
+    abs_weight = weight.detach().abs()
     if weight.ndim != 2:
-        scale = weight.detach().abs().amax().clamp_min(eps) / 127.0
-        q = torch.clamp(torch.round(weight / scale), -127, 127)
+        if clip_percentile >= 100.0:
+            clip = abs_weight.amax()
+        else:
+            clip = torch.quantile(abs_weight.flatten(), q_level)
+        clip = clip.clamp_min(eps)
+        scale = clip / qmax
+        q = torch.clamp(torch.round(torch.clamp(weight, -clip, clip) / scale), -qmax, qmax)
         dq = q * scale
         return weight + (dq - weight).detach()
-    scale = weight.detach().abs().amax(dim=1, keepdim=True).clamp_min(eps) / 127.0
-    q = torch.clamp(torch.round(weight / scale), -127, 127)
+    if clip_percentile >= 100.0:
+        clip = abs_weight.amax(dim=1, keepdim=True)
+    else:
+        clip = torch.quantile(abs_weight, q_level, dim=1, keepdim=True)
+    clip = clip.clamp_min(eps)
+    scale = clip / qmax
+    q = torch.clamp(torch.round(torch.maximum(torch.minimum(weight, clip), -clip) / scale), -qmax, qmax)
     dq = q * scale
     return weight + (dq - weight).detach()
 
@@ -1239,6 +1256,8 @@ class FakeQuantLinear(nn.Module):
         bias: bool = False,
         fake_quant_during_train: bool = True,
         fake_quant_start_step: int = 0,
+        fake_quant_bits: int = 8,
+        fake_quant_clip_percentile: float = 100.0,
         num_adapter_slots: int = 0,
         adapter_rank: int = 0,
         adapter_alpha: float = 1.0,
@@ -1249,6 +1268,8 @@ class FakeQuantLinear(nn.Module):
         self.out_features = out_features
         self.fake_quant_during_train = fake_quant_during_train
         self.fake_quant_start_step = fake_quant_start_step
+        self.fake_quant_bits = fake_quant_bits
+        self.fake_quant_clip_percentile = fake_quant_clip_percentile
         self.register_buffer("global_step", torch.zeros((), dtype=torch.long), persistent=False)
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
@@ -1281,7 +1302,11 @@ class FakeQuantLinear(nn.Module):
 
     def _effective_weight(self) -> Tensor:
         if self.training and self.fake_quant_during_train and int(self.global_step.item()) >= self.fake_quant_start_step:
-            return per_row_fake_quant_ste(self.weight)
+            return per_row_fake_quant_ste(
+                self.weight,
+                bits=self.fake_quant_bits,
+                clip_percentile=self.fake_quant_clip_percentile,
+            )
         return self.weight
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
@@ -1386,15 +1411,25 @@ class GroupedQueryAttention(nn.Module):
 
 
 class ReLU2MLP(nn.Module):
-    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0, hidden_bonus: int = 0):
+    def __init__(self, cfg: ModelConfig, quant_cfg: QuantConfig | None = None, num_adapter_slots: int = 0, hidden_bonus: int = 0):
         super().__init__()
+        quant_cfg = QuantConfig() if quant_cfg is None else quant_cfg
         hidden = cfg.d_model * cfg.mlp_mult + hidden_bonus
+        use_low_bit_fake_quant = (
+            quant_cfg.low_bit_bits < 8
+            and "mlp.fc.weight" in quant_cfg.low_bit_name_patterns
+            and "mlp.proj.weight" in quant_cfg.low_bit_name_patterns
+        )
+        fake_quant_bits = quant_cfg.low_bit_bits if use_low_bit_fake_quant else 8
+        fake_quant_clip_percentile = quant_cfg.clip_percentile if use_low_bit_fake_quant else 100.0
         self.fc = FakeQuantLinear(
             cfg.d_model,
             hidden,
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
+            fake_quant_bits=fake_quant_bits,
+            fake_quant_clip_percentile=fake_quant_clip_percentile,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "mlp_in") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -1405,6 +1440,8 @@ class ReLU2MLP(nn.Module):
             bias=False,
             fake_quant_during_train=cfg.fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
+            fake_quant_bits=fake_quant_bits,
+            fake_quant_clip_percentile=fake_quant_clip_percentile,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "mlp_out") else 0,
             adapter_rank=cfg.adapter_rank,
             adapter_alpha=cfg.adapter_alpha,
@@ -1423,12 +1460,12 @@ class ReLU2MLP(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0, mlp_hidden_bonus: int = 0):
+    def __init__(self, cfg: ModelConfig, quant_cfg: QuantConfig | None = None, num_adapter_slots: int = 0, mlp_hidden_bonus: int = 0):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
         self.mlp_norm = RMSNorm(cfg.d_model)
         self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots)
-        self.mlp = ReLU2MLP(cfg, num_adapter_slots=num_adapter_slots, hidden_bonus=mlp_hidden_bonus)
+        self.mlp = ReLU2MLP(cfg, quant_cfg, num_adapter_slots=num_adapter_slots, hidden_bonus=mlp_hidden_bonus)
         scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
@@ -1451,19 +1488,24 @@ class TransformerBlock(nn.Module):
 
 
 class RecurrentGPT(nn.Module):
-    def __init__(self, cfg: ModelConfig):
+    def __init__(self, cfg: ModelConfig, quant_cfg: QuantConfig | None = None):
         super().__init__()
         self.cfg = cfg
+        quant_cfg = QuantConfig() if quant_cfg is None else quant_cfg
         non_recurrent_hidden_bonus = cfg.d_model // 2
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
         self.stem = nn.ModuleList(
-            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.stem_layers)]
+            [
+                TransformerBlock(cfg, quant_cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus)
+                for _ in range(cfg.stem_layers)
+            ]
         )
         self.shared = nn.ModuleList(
             [
                 TransformerBlock(
                     cfg,
+                    quant_cfg,
                     num_adapter_slots=cfg.recurrence_loops,
                     mlp_hidden_bonus=cfg.shared_mlp_hidden_bonus,
                 )
@@ -1471,7 +1513,10 @@ class RecurrentGPT(nn.Module):
             ]
         )
         self.tail = nn.ModuleList(
-            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.tail_layers)]
+            [
+                TransformerBlock(cfg, quant_cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus)
+                for _ in range(cfg.tail_layers)
+            ]
         )
         self.final_norm = RMSNorm(cfg.d_model)
         self.lm_head = None if cfg.tie_embeddings else FakeQuantLinear(
@@ -1720,7 +1765,7 @@ def _keep_float_tensor(name: str, tensor: Tensor, cfg: QuantConfig, passthrough_
 
 def quant_qmax_for_tensor(name: str, tensor: Tensor, cfg: QuantConfig) -> int:
     if cfg.low_bit_bits < 8 and tensor.ndim >= 2 and any(pattern in name for pattern in cfg.low_bit_name_patterns):
-        return (1 << (cfg.low_bit_bits - 1)) - 1
+        return qmax_for_bits(cfg.low_bit_bits)
     return 127
 
 
@@ -2398,7 +2443,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
         if device.type == "cuda":
             reset_peak_vram_stats(device)
 
-        model = RecurrentGPT(cfg.model).to(device)
+        model = RecurrentGPT(cfg.model, cfg.quant).to(device)
         if cfg.use_compile and hasattr(torch, "compile") and device.type == "cuda" and not cfg.evaluate_only:  # pragma: no cover - GPU feature
             model = torch.compile(model, dynamic=False)  # type: ignore[assignment]
         wrapped_model = maybe_wrap_ddp(model, dist_info, device)
