@@ -141,6 +141,8 @@ class QuantConfig:
     )
     scale_store_dtype: torch.dtype = torch.float16
     keep_float_store_dtype: torch.dtype = torch.float16
+    low_bit_name_patterns: tuple[str, ...] = ()
+    low_bit_bits: int = 8
     clip_percentile: float = 99.999
     zlib_level: int = 9
 
@@ -315,6 +317,8 @@ def train_config_from_dict(data: Mapping[str, Any]) -> TrainConfig:
                 quant_payload[key] = _maybe_parse_torch_dtype(quant_payload[key])
         if "keep_float_name_patterns" in quant_payload and isinstance(quant_payload["keep_float_name_patterns"], list):
             quant_payload["keep_float_name_patterns"] = tuple(quant_payload["keep_float_name_patterns"])
+        if "low_bit_name_patterns" in quant_payload and isinstance(quant_payload["low_bit_name_patterns"], list):
+            quant_payload["low_bit_name_patterns"] = tuple(quant_payload["low_bit_name_patterns"])
         cfg.quant = QuantConfig(**quant_payload)
     if isinstance(cfg.counted_code_paths, list):
         cfg.counted_code_paths = tuple(cfg.counted_code_paths)
@@ -470,6 +474,30 @@ def retune_shifted_deep_tail_width_and_warmdown(cfg: TrainConfig) -> None:
         return
     model_cfg.shared_mlp_hidden_bonus = (model_cfg.d_model * 3) // 8
     cfg.optim.warmdown_steps = 80
+
+
+def use_int6_mlp_export_on_retuned_stemless_deep_tail(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 8:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != (model_cfg.d_model * 3) // 8:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != 20:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_name_patterns:
+        return
+    if cfg.quant.low_bit_bits != 8:
+        return
+    cfg.quant.low_bit_bits = 6
+    cfg.quant.low_bit_name_patterns = ("mlp.fc.weight", "mlp.proj.weight")
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -1690,20 +1718,27 @@ def _keep_float_tensor(name: str, tensor: Tensor, cfg: QuantConfig, passthrough_
     return tensor
 
 
-def quantize_float_tensor_export(tensor: Tensor, cfg: QuantConfig) -> tuple[Tensor, Tensor]:
+def quant_qmax_for_tensor(name: str, tensor: Tensor, cfg: QuantConfig) -> int:
+    if cfg.low_bit_bits < 8 and tensor.ndim >= 2 and any(pattern in name for pattern in cfg.low_bit_name_patterns):
+        return (1 << (cfg.low_bit_bits - 1)) - 1
+    return 127
+
+
+def quantize_float_tensor_export(name: str, tensor: Tensor, cfg: QuantConfig) -> tuple[Tensor, Tensor]:
     t32 = tensor.float()
+    qmax = quant_qmax_for_tensor(name, t32, cfg)
     q_level = cfg.clip_percentile / 100.0
     if t32.ndim == 2:
         clip = torch.quantile(t32.abs(), q_level, dim=1) if t32.numel() else torch.empty((t32.shape[0],), dtype=torch.float32)
-        clip = clip.clamp_min(1.0 / 127.0)
+        clip = clip.clamp_min(1.0 / qmax)
         clipped = torch.maximum(torch.minimum(t32, clip[:, None]), -clip[:, None])
-        scale = (clip / 127.0).clamp_min(1.0 / 127.0)
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
+        scale = (clip / qmax).clamp_min(1.0 / qmax)
+        q = torch.clamp(torch.round(clipped / scale[:, None]), -qmax, qmax).to(torch.int8).contiguous()
         return q, scale.to(dtype=cfg.scale_store_dtype).contiguous()
     clip_scalar = float(torch.quantile(t32.abs().flatten(), q_level).item()) if t32.numel() else 0.0
-    clip_scalar = max(clip_scalar, 1.0 / 127.0)
-    scale = torch.tensor(clip_scalar / 127.0, dtype=torch.float32)
-    q = torch.clamp(torch.round(torch.clamp(t32, -clip_scalar, clip_scalar) / scale), -127, 127).to(torch.int8).contiguous()
+    clip_scalar = max(clip_scalar, 1.0 / qmax)
+    scale = torch.tensor(clip_scalar / qmax, dtype=torch.float32)
+    q = torch.clamp(torch.round(torch.clamp(t32, -clip_scalar, clip_scalar) / scale), -qmax, qmax).to(torch.int8).contiguous()
     return q, scale
 
 
@@ -1738,7 +1773,7 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor], cfg: QuantConfig) ->
             stats["quant_payload_bytes"] += tensor_nbytes(kept)
             continue
         stats["num_float_tensors"] += 1
-        q, scale = quantize_float_tensor_export(t, cfg)
+        q, scale = quantize_float_tensor_export(name, t, cfg)
         quantized[name] = q
         scales[name] = scale
         dtypes[name] = str(t.dtype).removeprefix("torch.")
@@ -2288,6 +2323,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("val_every must be >= 0")
     if cfg.quant.clip_percentile <= 0.0 or cfg.quant.clip_percentile > 100.0:
         raise ConfigError("quant.clip_percentile must be in (0, 100]")
+    if cfg.quant.low_bit_bits < 2 or cfg.quant.low_bit_bits > 8:
+        raise ConfigError("quant.low_bit_bits must be in [2, 8]")
     invalid_targets = sorted(set(cfg.model.adapter_targets) - set(ALLOWED_ADAPTER_TARGETS))
     if invalid_targets:
         raise ConfigError(f"invalid adapter_targets: {invalid_targets}")
@@ -3108,6 +3145,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg)
     shift_accepted_deep_tail_stem_into_tail(cfg)
     retune_shifted_deep_tail_width_and_warmdown(cfg)
+    use_int6_mlp_export_on_retuned_stemless_deep_tail(cfg)
     return cfg
 
 
