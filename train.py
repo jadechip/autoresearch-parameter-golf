@@ -818,6 +818,37 @@ def rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg: TrainConfig) -> N
     model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 6
 
 
+def deepen_recovered_compact_seq768_line_with_one_more_unique_carrier_block(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != 20:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    if cfg.grad_accum_steps != 4:
+        return
+    if cfg.train_batch_tokens != 122_880 or cfg.val_batch_tokens != 122_880:
+        return
+    model_cfg.shared_layers = 2
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -3494,6 +3525,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     trade_one_more_tail_block_for_12x_tail_mlp_on_compact_seq640_line(cfg)
     extend_context_on_compact_tail2_12x_line(cfg)
     rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg)
+    deepen_recovered_compact_seq768_line_with_one_more_unique_carrier_block(cfg)
     return cfg
 
 
