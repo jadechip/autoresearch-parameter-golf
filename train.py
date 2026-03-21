@@ -969,47 +969,6 @@ def shrink_global_batch_on_selective_qat_low_rank_q_compact_line(cfg: TrainConfi
     cfg.train_batch_tokens = 92_160
 
 
-def keep_tied_embeddings_float_on_selective_qat_low_rank_q_compact_line(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if not model_cfg.tie_embeddings:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if not model_cfg.fake_quant_during_train or model_cfg.attn_fake_quant_during_train is not False:
-        return
-    if model_cfg.fake_quant_start_step != 20:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    if cfg.grad_accum_steps != 3:
-        return
-    if cfg.train_batch_tokens != 92_160 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if "tok_emb.weight" in cfg.quant.keep_float_name_patterns:
-        return
-    cfg.quant.keep_float_name_patterns = (*cfg.quant.keep_float_name_patterns, "tok_emb.weight")
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2337,7 +2296,7 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor], cfg: QuantConfig) ->
             passthrough[name] = t
             stats["quant_payload_bytes"] += tensor_nbytes(t)
             continue
-        if t.numel() <= cfg.keep_float_max_numel or any(pattern in name for pattern in cfg.keep_float_name_patterns):
+        if t.numel() <= cfg.keep_float_max_numel:
             kept = _keep_float_tensor(name, t, cfg, passthrough_orig_dtypes)
             passthrough[name] = kept
             stats["quant_payload_bytes"] += tensor_nbytes(kept)
@@ -3772,7 +3731,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_short_to_full_context_curriculum_on_low_rank_q_compact_line(cfg)
     disable_attention_fake_quant_on_warmed_low_rank_q_compact_line(cfg)
     shrink_global_batch_on_selective_qat_low_rank_q_compact_line(cfg)
-    keep_tied_embeddings_float_on_selective_qat_low_rank_q_compact_line(cfg)
     return cfg
 
 
