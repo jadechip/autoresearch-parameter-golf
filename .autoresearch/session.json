@@ -1,49 +1,51 @@
 {
-  "accepted_artifact_bytes": 6661152,
-  "accepted_commit": "b197965da4700b8ff890c9f0d5c0ab634791f3b9",
-  "accepted_commit_short": "b197965",
-  "accepted_results_path": "runs/autoresearch_5090/runs/ar5090-20260321-050633/results.json",
-  "accepted_run_id": "ar5090-20260321-050633",
-  "accepted_val_bpb": 1.5651026536085302,
-  "baseline_artifact_bytes": 9185730,
-  "baseline_results_path": "/workspace/autoresearch-parameter-golf-ralph/runs/autoresearch_5090/runs/ar5090-20260319-173949/results.json",
-  "baseline_run_id": "ar5090-20260319-173949",
-  "baseline_val_bpb": 1.7116757387579924,
-  "created_at_unix": 1773944166.3701816,
+  "accepted_artifact_bytes": 7613658,
+  "accepted_commit": "60c0412b67c349f5b042b42fe150d22df94066bf",
+  "accepted_commit_short": "60c0412",
+  "accepted_results_path": "runs/autoresearch_5090/runs/ar5090-20260321-124251/results.json",
+  "accepted_run_id": "ar5090-20260321-124251",
+  "accepted_val_bpb": 1.5672204203220073,
+  "baseline_artifact_bytes": 7174403,
+  "baseline_results_path": "/workspace/autoresearch-parameter-golf/runs/autoresearch_5090/runs/baseline_5090_5min_rerun/results.json",
+  "baseline_run_id": "baseline_5090_5min_rerun",
+  "baseline_val_bpb": 1.5701376649442806,
+  "created_at_unix": 1774089643.238404,
   "current_branch": "autoresearch/20260319-181724",
   "current_experiment": null,
-  "latest_artifact_bytes": 7087387,
-  "latest_decision": "reverted",
-  "latest_results_path": "/workspace/autoresearch-parameter-golf-ralph/runs/autoresearch_5090/runs/ar5090-20260321-062633/results.json",
-  "latest_run_id": "ar5090-20260321-062633",
+  "latest_artifact_bytes": 7613658,
+  "latest_decision": "accepted",
+  "latest_results_path": "/workspace/autoresearch-parameter-golf/runs/autoresearch_5090/runs/ar5090-20260321-124251/results.json",
+  "latest_run_id": "ar5090-20260321-124251",
   "latest_status": "success",
-  "latest_val_bpb": 1.5704062353384025,
-  "repo_root": "/workspace/autoresearch-parameter-golf-ralph",
+  "latest_val_bpb": 1.5672204203220073,
+  "repo_root": "/workspace/autoresearch-parameter-golf",
   "schema_version": "pgolf.autoresearch_session.v1",
   "search_policy": {
-    "artifact_target_bytes_max": 12000000,
-    "artifact_target_bytes_min": 7000000,
+    "artifact_target_bytes_max": 15500000,
+    "artifact_target_bytes_min": 12000000,
     "do_not_overweight": [
-      "Do not cargo-cult public PRs.",
-      "Treat these as priors, not recipes.",
-      "Stay inside the current baseline family unless measurements justify a bigger change."
+      "Do not cargo-cult leaderboard entries.",
+      "Treat public leaderboard patterns as priors, not recipes.",
+      "Do not repeat known-losing compact-line moves without a new major hypothesis.",
+      "Do not keep using recurrence or tiny-model compression as the main search direction."
     ],
     "external_priors": [
-      "Top public competitors often improve the baseline family rather than replacing it.",
-      "Wider MLPs, often around 3x, appear frequently in strong runs.",
-      "Mixed lower-bit quantization on large matrices appears promising.",
-      "FP16 tied embedding passthrough appears promising.",
-      "Lower LR, higher Muon momentum, and longer warmdown appear promising.",
-      "Sliding-window evaluation appears in strong public runs, but only use it if it stays competition-valid."
+      "The recovered compact 5090 baseline is now in the wrong regime for a likely win: the next serious search should move toward a stronger, near-full-budget carrier instead of more shrinkage.",
+      "Top leaderboard entries cluster around near-full-budget nonrecurrent carriers, mixed low-bit quantization, longer context, and stronger training/eval tricks rather than pure recurrence.",
+      "Low-rank Q is a promising structural reallocation tool because it can buy more unique depth, a stronger local module, or more steps.",
+      "Late selective coarse-group quantization is more promising than blanket early QAT or highly heterogeneous mixed-bit schemes.",
+      "Longer context and sliding-window eval appear promising, but only if they remain competition-valid and fit the fixed budget.",
+      "Optimizer bundles with Muon momentum, weight decay, warmdown, and possibly SWA should follow a stronger structural candidate, not replace one."
     ],
     "max_consecutive_losing_micro_experiments": 3,
     "min_meaningful_bpb_gain": 0.001,
     "next_priority_axes": [
-      "mlp_mult",
-      "precision policy for embeddings/head",
-      "lower-bit or mixed-bit matrix quantization feasibility",
-      "optimizer schedule: lower LR / higher Muon momentum / longer warmdown",
-      "fake_quant_start_step and clip_percentile"
+      "near-full-budget carrier with lower recurrence, more unique depth, and wider MLPs",
+      "low-rank Q as a structural reallocation tool",
+      "late selective coarse-group quantization or post-quant checkpoint soup",
+      "selective higher precision for embeddings or head",
+      "compute-aware batch and context curricula",
+      "smarter local-token modules with better byte/quality tradeoffs"
     ],
     "structural_axes": [
       "d_model",
@@ -52,37 +54,9 @@
       "mlp_mult",
       "adapter_rank_and_targets",
       "fake_quant_start_step_and_clip_percentile"
-    ],
-    "temporary_mode": {
-      "active": true,
-      "disallowed_micro_axes": [
-        "matrix_lr_only",
-        "warmdown_only",
-        "clip_percentile_only",
-        "adapter_alpha_only",
-        "tiny hidden bonus retunes",
-        "single-constant edits without a larger hypothesis"
-      ],
-      "goal": "Try a small number of larger, leaderboard-informed jumps before H100 rehearsal.",
-      "max_iterations": 5,
-      "name": "structural_jump_phase",
-      "priority_axes": [
-        "mlp_mult with materially wider MLP, including ~3x if feasible",
-        "fp16 tied embedding or embedding/head precision passthrough",
-        "optimizer schedule retune as a coherent bundle: lower LR, higher Muon momentum, longer warmdown",
-        "int6 or mixed low-bit quantization on large matrices if it can be implemented cleanly",
-        "sliding-window evaluation only if it remains competition-valid",
-        "seq_len toward 2048 if feasible under the budget"
-      ],
-      "rules": [
-        "Prefer substantial changes over neighborhood hill-climbing.",
-        "Do not use this phase for tiny LR-only, clip-only, adapter-alpha-only, or hidden-bonus-only tweaks.",
-        "Each experiment should test a major hypothesis with plausible upside beyond noise.",
-        "If no meaningful win appears after max_iterations, return to the accepted best and resume normal search."
-      ]
-    }
+    ]
   },
-  "state_dir": "/workspace/autoresearch-parameter-golf-ralph/.autoresearch",
+  "state_dir": "/workspace/autoresearch-parameter-golf/.autoresearch",
   "status": "ready",
-  "updated_at_unix": 1774074909.059531
+  "updated_at_unix": 1774097505.994161
 }
