@@ -103,7 +103,6 @@ class ModelConfig:
     adapter_targets: tuple[str, ...] = ("attn_out", "mlp_out")
     qk_gain_init: float = 1.0
     q_low_rank: int = 0
-    non_recurrent_adapter_slots: int = 0
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     fake_quant_start_step: int = 50
@@ -1043,45 +1042,6 @@ def delay_mlp_fake_quant_until_full_context_on_small_batch_selective_qat_line(cf
     if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
         return
     model_cfg.fake_quant_start_step = cfg.train_seq_len_warmup_steps
-
-
-def enable_single_slot_non_recurrent_adapters_on_small_batch_selective_qat_line(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.non_recurrent_adapter_slots != 0:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if not model_cfg.fake_quant_during_train or model_cfg.attn_fake_quant_during_train is not False:
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    model_cfg.non_recurrent_adapter_slots = 1
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -2085,11 +2045,8 @@ class TransformerBlock(nn.Module):
         return scale.to(dtype=x.dtype)
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
-        effective_slot = slot
-        if effective_slot is None and self.attn_scale.ndim == 2 and self.attn_scale.size(0) == 1:
-            effective_slot = 0
-        x = x + self.attn(self.attn_norm(x), slot=effective_slot) * self.residual_scale(self.attn_scale, x, effective_slot)
-        x = x + self.mlp(self.mlp_norm(x), slot=effective_slot) * self.residual_scale(self.mlp_scale, x, effective_slot)
+        x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
+        x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         return x
 
 
@@ -2105,14 +2062,7 @@ class RecurrentGPT(nn.Module):
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
         self.stem = nn.ModuleList(
-            [
-                TransformerBlock(
-                    cfg,
-                    num_adapter_slots=cfg.non_recurrent_adapter_slots,
-                    mlp_hidden_bonus=non_recurrent_hidden_bonus,
-                )
-                for _ in range(cfg.stem_layers)
-            ]
+            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.stem_layers)]
         )
         self.shared = nn.ModuleList(
             [
@@ -2125,14 +2075,7 @@ class RecurrentGPT(nn.Module):
             ]
         )
         self.tail = nn.ModuleList(
-            [
-                TransformerBlock(
-                    cfg,
-                    num_adapter_slots=cfg.non_recurrent_adapter_slots,
-                    mlp_hidden_bonus=non_recurrent_hidden_bonus,
-                )
-                for _ in range(cfg.tail_layers)
-            ]
+            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.tail_layers)]
         )
         self.final_norm = RMSNorm(cfg.d_model)
         self.lm_head = None if cfg.tie_embeddings else FakeQuantLinear(
@@ -2974,8 +2917,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("q_low_rank must be >= 0")
     if cfg.model.q_low_rank >= cfg.model.d_model:
         raise ConfigError("q_low_rank must be smaller than d_model")
-    if cfg.model.non_recurrent_adapter_slots not in {0, 1}:
-        raise ConfigError("non_recurrent_adapter_slots must be 0 or 1")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
@@ -3867,7 +3808,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     shrink_global_batch_on_selective_qat_low_rank_q_compact_line(cfg)
     shrink_global_batch_further_on_selective_qat_low_rank_q_compact_line(cfg)
     delay_mlp_fake_quant_until_full_context_on_small_batch_selective_qat_line(cfg)
-    enable_single_slot_non_recurrent_adapters_on_small_batch_selective_qat_line(cfg)
     return cfg
 
 
