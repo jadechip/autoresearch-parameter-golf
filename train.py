@@ -783,7 +783,7 @@ def extend_context_on_compact_tail2_12x_line(cfg: TrainConfig) -> None:
     model_cfg.seq_len = 768
 
 
-def extend_context_on_compact_seq768_tail2_12x_line(cfg: TrainConfig) -> None:
+def rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 2:
         return
@@ -811,9 +811,10 @@ def extend_context_on_compact_seq768_tail2_12x_line(cfg: TrainConfig) -> None:
         return
     if cfg.train_batch_tokens != 122_880 or cfg.val_batch_tokens != 122_880:
         return
-    model_cfg.seq_len = 832
-    cfg.train_batch_tokens = 119_808
-    cfg.val_batch_tokens = 119_808
+    model_cfg.recurrence_loops = 1
+    model_cfg.tail_layers = 3
+    model_cfg.shared_mlp_hidden_bonus = 0
+    model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 6
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -3488,7 +3489,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     trade_one_tail_block_for_8x_tail_mlp_on_compact_seq640_line(cfg)
     trade_one_more_tail_block_for_12x_tail_mlp_on_compact_seq640_line(cfg)
     extend_context_on_compact_tail2_12x_line(cfg)
-    extend_context_on_compact_seq768_tail2_12x_line(cfg)
+    rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg)
     return cfg
 
 
