@@ -12,12 +12,12 @@
   "created_at_unix": 1773944166.3701816,
   "current_branch": "autoresearch/20260319-181724",
   "current_experiment": null,
-  "latest_artifact_bytes": 7657311,
-  "latest_decision": "accepted",
-  "latest_results_path": "/workspace/autoresearch-parameter-golf-ralph/runs/autoresearch_5090/runs/ar5090-20260321-023626/results.json",
-  "latest_run_id": "ar5090-20260321-023626",
+  "latest_artifact_bytes": 8178277,
+  "latest_decision": "reverted",
+  "latest_results_path": "/workspace/autoresearch-parameter-golf-ralph/runs/autoresearch_5090/runs/ar5090-20260321-024958/results.json",
+  "latest_run_id": "ar5090-20260321-024958",
   "latest_status": "success",
-  "latest_val_bpb": 1.5942985856421417,
+  "latest_val_bpb": 1.6025690520100406,
   "repo_root": "/workspace/autoresearch-parameter-golf-ralph",
   "schema_version": "pgolf.autoresearch_session.v1",
   "search_policy": {
@@ -84,5 +84,5 @@
   },
   "state_dir": "/workspace/autoresearch-parameter-golf-ralph/.autoresearch",
   "status": "ready",
-  "updated_at_unix": 1774061107.3935049
+  "updated_at_unix": 1774061933.1496654
 }
