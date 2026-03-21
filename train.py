@@ -655,6 +655,32 @@ def widen_unique_tail_mlp_on_int6_5x_line(cfg: TrainConfig) -> None:
     model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 4
 
 
+def raise_global_mlp_mult_on_int6_6x_tail_line(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 4:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != (model_cfg.d_model * 3) // 8:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 4:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != 20:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    model_cfg.mlp_mult = 3
+    model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 3
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -3313,6 +3339,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     trade_one_more_tail_block_for_4p5x_tail_mlp_on_int6_4x_line(cfg)
     widen_unique_tail_mlp_on_int6_4p5x_line(cfg)
     widen_unique_tail_mlp_on_int6_5x_line(cfg)
+    raise_global_mlp_mult_on_int6_6x_tail_line(cfg)
     return cfg
 
 
