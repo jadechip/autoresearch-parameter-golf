@@ -104,6 +104,7 @@ class ModelConfig:
     qk_gain_init: float = 1.0
     q_low_rank: int = 0
     fake_quant_during_train: bool = True
+    attn_fake_quant_during_train: bool | None = None
     fake_quant_start_step: int = 50
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
@@ -889,6 +890,45 @@ def add_short_to_full_context_curriculum_on_low_rank_q_compact_line(cfg: TrainCo
         return
     cfg.train_seq_len_min = 640
     cfg.train_seq_len_warmup_steps = 160
+
+
+def disable_attention_fake_quant_on_warmed_low_rank_q_compact_line(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
+        return
+    if model_cfg.q_low_rank != model_cfg.d_model // 4:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if not model_cfg.fake_quant_during_train:
+        return
+    if model_cfg.attn_fake_quant_during_train is not None:
+        return
+    if model_cfg.fake_quant_start_step != 20:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    if cfg.grad_accum_steps != 4:
+        return
+    if cfg.train_batch_tokens != 122_880 or cfg.val_batch_tokens != 122_880:
+        return
+    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
+        return
+    model_cfg.attn_fake_quant_during_train = False
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -1744,12 +1784,15 @@ class GroupedQueryAttention(nn.Module):
         self.num_kv_heads = cfg.num_kv_heads
         self.head_dim = cfg.d_model // cfg.num_heads
         self.rope = RotaryEmbedding(self.head_dim, base=cfg.rope_base)
+        attn_fake_quant_during_train = (
+            cfg.fake_quant_during_train if cfg.attn_fake_quant_during_train is None else cfg.attn_fake_quant_during_train
+        )
         if cfg.q_low_rank > 0:
             self.q_proj = LowRankQProjection(
                 cfg.d_model,
                 cfg.d_model,
                 rank=cfg.q_low_rank,
-                fake_quant_during_train=cfg.fake_quant_during_train,
+                fake_quant_during_train=attn_fake_quant_during_train,
                 fake_quant_start_step=cfg.fake_quant_start_step,
                 num_adapter_slots=num_adapter_slots if has_adapter(cfg, "q") else 0,
                 adapter_rank=cfg.adapter_rank,
@@ -1760,7 +1803,7 @@ class GroupedQueryAttention(nn.Module):
                 cfg.d_model,
                 cfg.d_model,
                 bias=False,
-                fake_quant_during_train=cfg.fake_quant_during_train,
+                fake_quant_during_train=attn_fake_quant_during_train,
                 fake_quant_start_step=cfg.fake_quant_start_step,
                 num_adapter_slots=num_adapter_slots if has_adapter(cfg, "q") else 0,
                 adapter_rank=cfg.adapter_rank,
@@ -1770,7 +1813,7 @@ class GroupedQueryAttention(nn.Module):
             cfg.d_model,
             cfg.num_kv_heads * self.head_dim,
             bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
+            fake_quant_during_train=attn_fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "k") else 0,
             adapter_rank=cfg.adapter_rank,
@@ -1780,7 +1823,7 @@ class GroupedQueryAttention(nn.Module):
             cfg.d_model,
             cfg.num_kv_heads * self.head_dim,
             bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
+            fake_quant_during_train=attn_fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "v") else 0,
             adapter_rank=cfg.adapter_rank,
@@ -1790,7 +1833,7 @@ class GroupedQueryAttention(nn.Module):
             cfg.d_model,
             cfg.d_model,
             bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
+            fake_quant_during_train=attn_fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "attn_out") else 0,
             adapter_rank=cfg.adapter_rank,
@@ -3648,6 +3691,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg)
     reallocate_low_rank_q_into_true_3x_carrier_on_recovered_compact_line(cfg)
     add_short_to_full_context_curriculum_on_low_rank_q_compact_line(cfg)
+    disable_attention_fake_quant_on_warmed_low_rank_q_compact_line(cfg)
     return cfg
 
 
