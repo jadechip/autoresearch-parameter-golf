@@ -19,6 +19,7 @@ At the start of a session, inspect:
 - recent git history on that autoresearch branch
 - `.autoresearch/session.json`
 - `.autoresearch/notes.md`
+- `COMPETITIVE_PRIORS.md`
 - `runs/autoresearch_5090/index/best.json`
 
 Use git history as the experiment memory for what has already been tried and what has already won.
@@ -90,12 +91,18 @@ Keep the baseline family intact:
 - RoPE
 - RMSNorm
 - ReLU^2 MLP
-- depth recurrence via shared blocks
+- depth recurrence or shallow shared-core variants via shared blocks
 - per-loop adapters
 - QAT-aware training
 - row-wise INT8 export + zlib packing
 
 You may reallocate capacity within this family, but do not wander into unrelated architecture rewrites.
+
+Current recovered search baseline:
+
+- the last trusted compact 5090 winner was a `seq_len=768`, `1 shared x 1 loop`, `tail=3`, `8x` unique-tail MLP line at about `7.26 MB`
+- that materially under-spends the hard `16 MB` cap
+- do not assume the best next move is to keep shrinking the model
 
 ## Production-Proxy Objective
 
@@ -111,11 +118,11 @@ Subject to:
 - no unreasonable VRAM explosion
 - simplicity preference
 
-This repo's current 5090 baseline materially under-spends the final artifact budget. Do not assume the best search strategy is to keep the model tiny and only polish optimizer settings. Favor ideas that plausibly improve the final `8xH100` submission regime, including sensible use of additional bytes.
+This repo's current compact 5090 baseline materially under-spends the final artifact budget. Do not assume the best search strategy is to keep the model tiny and only polish optimizer settings. Favor ideas that plausibly improve the final `8xH100` submission regime, including deliberate use of additional bytes.
 
 Use the search policy recorded in `.autoresearch/session.json`:
 
-- soft artifact target band for 5090 search: `7,000,000` to `12,000,000` bytes
+- soft artifact target band for 5090 search: `8,000,000` to `14,000,000` bytes
 - meaningful improvement threshold: about `0.001 val_bpb`
 - maximum consecutive losing micro-tuning runs before a required structural follow-up: `3`
 
@@ -139,6 +146,15 @@ Prioritize production-relevant knobs first:
 
 If artifact usage remains far below the cap, prefer bounded architecture / byte-allocation experiments before endless micro-tuning of optimizer settings.
 
+Prioritize leaderboard-aligned directions that still fit inside `train.py`:
+
+- mixed low-bit quantization beyond MLP-only export
+- selective higher-precision embeddings / head
+- selective or compensated `~3x` MLP families rather than blanket global `mlp_mult=3`
+- longer context or sliding-window eval when compute is reclaimed elsewhere
+- stronger optimizer bundles with Muon momentum, weight decay, warmdown, and possibly SWA after a structural candidate exists
+- frontier-style initialization or gating ideas that are local to `train.py`
+
 In a fresh session, the first search block should deliberately cover structural axes before settling into local hill-climbing:
 
 - `d_model`
@@ -154,6 +170,12 @@ Avoid spending time on:
 - changes that mainly exploit logging / harness quirks
 - high-complexity tweaks for tiny gains
 - changes that make final single-script submission meaningfully uglier
+- repeating known-losing compact-line moves without a new major hypothesis:
+  - blunt `d_model` widening
+  - full `num_kv_heads=8`
+  - near-neighbor context increases above `768` without compute reclamation
+  - compensated global `mlp_mult=3`
+  - pure tail-width nudges
 
 ## Search Policy
 

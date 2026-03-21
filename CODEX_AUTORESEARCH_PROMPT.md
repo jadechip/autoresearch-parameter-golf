@@ -21,7 +21,7 @@ Recommended human launch flow:
 4. paste the prompt below
 
 ```text
-Read program.md and AUTORESEARCH_SETUP.md first.
+Read program.md, AUTORESEARCH_SETUP.md, and COMPETITIVE_PRIORS.md first.
 
 You are running an autoresearch loop in this repo.
 
@@ -67,11 +67,25 @@ Rules:
 - Use runs/autoresearch_5090/index/latest.json and runs/autoresearch_5090/index/best.json as the control surface.
 - Do not scrape stdout or rely on run.log.
 - Treat runs/autoresearch_5090/index/best.json as numeric telemetry, not the sole source of truth for accepted state.
-- Architecture changes inside the current recurrent-QAT baseline family are allowed and encouraged.
+- Architecture changes inside the current decoder-only / tied-embedding / GQA / RoPE / RMSNorm / ReLU^2 baseline family are allowed and encouraged.
 - Do not chase 5090-only hacks that are unlikely to matter on H100.
+- Treat `COMPETITIVE_PRIORS.md` as the current research brief. The recovered compact baseline materially under-spends the hard `16 MB` cap, so prefer deliberate capacity spending and leaderboard-informed search over more shrinkage.
 - If accepted artifact size remains below the search-policy target band, prefer bounded architecture and byte-allocation experiments over endless optimizer micro-tuning.
 - The first search block in a fresh session should cover structural axes before long micro-tuning streaks: `d_model`, `shared_layers` vs `recurrence_loops`, `tail_layers`, `mlp_mult`, `adapter_rank` / `adapter_targets`, and fake-quant timing / clip percentile.
 - Do not spend more than the search-policy limit of consecutive losing micro-tuning experiments without making the next run a structural or byte-allocation experiment.
+- Prioritize larger, leaderboard-aligned experiments that are still implementable inside `train.py`:
+  - mixed low-bit quantization beyond MLP-only export
+  - selective wider MLP allocations instead of blanket global `mlp_mult=3`
+  - longer context or sliding-window eval if compute is reclaimed elsewhere
+  - selective higher precision for embeddings / head
+  - stronger optimizer bundles only after a structural candidate exists
+  - frontier-style initialization or gating ideas that fit this repo
+- Deprioritize ideas that already lost on the compact line unless paired with a new major hypothesis:
+  - blunt `d_model` widening
+  - full `num_kv_heads=8`
+  - near-neighbor context increases above `768` without compute reclamation
+  - compensated global `mlp_mult=3`
+  - pure tail-width nudges
 - Use `.autoresearch/notes.md` as a durable ledger of open, tried, winning, and rejected structural hypotheses.
 - If a run fails, inspect crash.json and fix only if the idea still seems sound.
 - Before each run, commit the exact train.py experiment to the current autoresearch branch.
@@ -90,7 +104,7 @@ Rules:
 
 Expected command loop inside Codex:
 
-1. inspect branch tip, `.autoresearch/session.json`, `.autoresearch/notes.md`, recent commits, and `runs/autoresearch_5090/index/best.json`
+1. inspect branch tip, `.autoresearch/session.json`, `.autoresearch/notes.md`, `COMPETITIVE_PRIORS.md`, recent commits, and `runs/autoresearch_5090/index/best.json`
 2. edit `train.py`
 3. commit the experiment
 4. run `bash scripts/run_autoresearch_experiment.sh`

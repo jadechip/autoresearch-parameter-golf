@@ -201,6 +201,37 @@ def test_validation_schedule_helpers() -> None:
     assert mod.train_time_validation_enabled(cfg, has_validation=False) is False
 
 
+def test_rebalance_compact_seq768_tail2_12x_line_into_tail3_8x() -> None:
+    cfg = mod.TrainConfig(train_batch_tokens=122_880, val_batch_tokens=122_880, grad_accum_steps=4)
+    cfg.model = mod.ModelConfig(
+        seq_len=768,
+        d_model=512,
+        mlp_mult=2,
+        stem_layers=0,
+        shared_layers=1,
+        recurrence_loops=2,
+        tail_layers=2,
+        adapter_rank=8,
+        adapter_alpha=16.0,
+        adapter_targets=mod.ALLOWED_ADAPTER_TARGETS,
+        fake_quant_start_step=20,
+        shared_mlp_hidden_bonus=(512 * 3) // 8,
+        non_recurrent_mlp_hidden_bonus=512 * 10,
+    )
+    cfg.optim.warmdown_steps = 80
+    cfg.quant.low_bit_bits = 6
+    cfg.quant.low_bit_name_patterns = ("mlp.fc.weight", "mlp.proj.weight")
+    cfg.quant.clip_percentile = 96.5
+
+    mod.rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg)
+
+    assert cfg.model.recurrence_loops == 1
+    assert cfg.model.tail_layers == 3
+    assert cfg.model.shared_mlp_hidden_bonus == 0
+    assert cfg.model.non_recurrent_mlp_hidden_bonus == 512 * 6
+    assert cfg.model.seq_len == 768
+
+
 def test_write_and_load_shard_roundtrip(tmp_path: Path) -> None:
     tokens = np.array([1, 2, 3, 4, 5], dtype=np.uint16)
     shard = mod.write_data_shard(tmp_path / "toy.bin", tokens)
@@ -882,15 +913,19 @@ def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path) -> None
     assert session["status"] == "ready"
     assert session["accepted_run_id"] == "baseline"
     assert session["accepted_artifact_bytes"] == 1
-    assert session["search_policy"]["artifact_target_bytes_min"] == 7_000_000
-    assert session["search_policy"]["artifact_target_bytes_max"] == 12_000_000
+    assert session["search_policy"]["artifact_target_bytes_min"] == 8_000_000
+    assert session["search_policy"]["artifact_target_bytes_max"] == 14_000_000
     assert session["search_policy"]["max_consecutive_losing_micro_experiments"] == 3
+    assert session["search_policy"]["external_priors"]
+    assert session["search_policy"]["next_priority_axes"]
+    assert session["search_policy"]["do_not_overweight"]
     assert (state_dir / "notes.md").is_file()
     assert (state_dir / "activity.log").is_file()
     assert (state_dir / "errors.log").is_file()
     assert (state_dir / "runs").is_dir()
     notes_text = (state_dir / "notes.md").read_text(encoding="utf-8")
     assert "Structural campaign checklist" in notes_text
+    assert "Frontier priors" in notes_text
     assert "- [ ] d_model" in notes_text
 
     started = autoresearch_state.start_run(

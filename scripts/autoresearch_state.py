@@ -13,8 +13,8 @@ from train import append_jsonl, atomic_write_json, load_and_validate_results
 SESSION_SCHEMA_VERSION = "pgolf.autoresearch_session.v1"
 EXPERIMENT_LOG_SCHEMA_VERSION = "pgolf.autoresearch_experiment.v1"
 SEARCH_MIN_MEANINGFUL_BPB_GAIN = 0.001
-SEARCH_ARTIFACT_TARGET_BYTES_MIN = 7_000_000
-SEARCH_ARTIFACT_TARGET_BYTES_MAX = 12_000_000
+SEARCH_ARTIFACT_TARGET_BYTES_MIN = 8_000_000
+SEARCH_ARTIFACT_TARGET_BYTES_MAX = 14_000_000
 SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS = 3
 SEARCH_STRUCTURAL_AXES = [
     "d_model",
@@ -23,6 +23,27 @@ SEARCH_STRUCTURAL_AXES = [
     "mlp_mult",
     "adapter_rank_and_targets",
     "fake_quant_start_step_and_clip_percentile",
+]
+SEARCH_EXTERNAL_PRIORS = [
+    "The recovered compact 5090 baseline is materially under the hard 16 MB cap, so the next search block should spend bytes deliberately instead of continuing to shrink the model.",
+    "Top leaderboard entries cluster around 10-11 layers, roughly 2.6x-3x MLPs, mixed low-bit quantization, and stronger training/eval tricks rather than pure recurrence.",
+    "Mixed low-bit quantization beyond MLP-only export appears promising if the saved bytes are reinvested into width or unique depth.",
+    "Selective higher precision for embeddings or head appears promising.",
+    "Longer context and sliding-window eval appear promising, but only if they remain competition-valid and fit the fixed budget.",
+    "Optimizer bundles with Muon momentum, weight decay, warmdown, and possibly SWA should follow a stronger structural candidate, not replace one.",
+]
+SEARCH_NEXT_PRIORITY_AXES = [
+    "selective width or depth spending that moves the accepted line toward roughly 9 MB to 14 MB",
+    "mixed low-bit quantization beyond MLP-only export",
+    "selective higher precision for embeddings or head",
+    "longer context or sliding-window eval when compute is reclaimed",
+    "frontier-style initialization or gating ideas that fit train.py",
+    "optimizer bundles after a stronger structural candidate exists",
+]
+SEARCH_DO_NOT_OVERWEIGHT = [
+    "Do not cargo-cult leaderboard entries.",
+    "Treat public leaderboard patterns as priors, not recipes.",
+    "Do not repeat known-losing compact-line moves without a new major hypothesis.",
 ]
 
 
@@ -136,6 +157,11 @@ def ensure_notes_file(state_dir: Path) -> None:
         "- [ ] mlp_mult\n"
         "- [ ] adapter_rank / adapter_targets\n"
         "- [ ] fake_quant_start_step / clip_percentile\n\n"
+        "Frontier priors:\n"
+        "- Spend bytes deliberately if the accepted line is still well below the hard `16 MB` cap.\n"
+        "- Mixed low-bit quantization, selective higher-precision embeddings, and larger MLP families are higher-priority than more shrinkage.\n"
+        "- Longer context or sliding-window eval should only be tried when compute is reclaimed elsewhere.\n"
+        "- Avoid repeating known-losing compact-line moves without a new major hypothesis.\n\n"
         "Hypothesis ledger:\n"
         "- Open:\n"
         "- Tried:\n"
@@ -198,6 +224,9 @@ def init_session(state_dir: Path, baseline_results_path: Path, force: bool = Fal
             "artifact_target_bytes_max": SEARCH_ARTIFACT_TARGET_BYTES_MAX,
             "max_consecutive_losing_micro_experiments": SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS,
             "structural_axes": list(SEARCH_STRUCTURAL_AXES),
+            "external_priors": list(SEARCH_EXTERNAL_PRIORS),
+            "next_priority_axes": list(SEARCH_NEXT_PRIORITY_AXES),
+            "do_not_overweight": list(SEARCH_DO_NOT_OVERWEIGHT),
         },
     }
     write_session(state_dir, session)

@@ -14,6 +14,7 @@ For Codex specifically, use:
 - `CODEX_AUTORESEARCH_PROMPT.md` as the copy/paste bootstrap prompt
 - `CODEX_AUTORESEARCH_ONE_SHOT_PROMPT.md` for the non-interactive loop runner
 - `program.md` as the durable search policy / contract
+- `COMPETITIVE_PRIORS.md` as the current leaderboard-aligned research brief
 
 ## Recommended Setup
 
