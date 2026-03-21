@@ -21,6 +21,7 @@ smoke_data/
 # Training and experiment outputs
 runs/
 .autoresearch/
+submission_candidates/
 out*/
 sample_outputs/tmp/
 

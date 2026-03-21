@@ -219,6 +219,81 @@ The recommended live monitor is TensorBoard:
 bash scripts/run_tensorboard_autoresearch.sh
 ```
 
+## H100 Rehearsals And Submission Packaging
+
+Once you have a strong candidate branch, the next step is to rehearse it against the actual challenge shape:
+
+- `1xH100` for transfer confirmation
+- `8xH100` for the real `10 minute` training/eval regime
+- a packaged `records/...` candidate folder you can turn into a PR
+
+### 1. Train On 1xH100 For 10 Minutes
+
+```bash
+RUN_ID=h100_1x_trial bash scripts/run_h100_1x_train.sh
+```
+
+This writes:
+
+- `./runs/runpod_h100_1x_10min/<run_id>/results.json`
+- `./runs/runpod_h100_1x_10min/<run_id>/train.log`
+- `./runs/runpod_h100_1x_10min/<run_id>/submission_bundle/`
+
+### 2. Train On 8xH100 For 10 Minutes
+
+```bash
+RUN_ID=h100_8x_trial bash scripts/run_h100_8x_train.sh
+```
+
+This uses `torchrun --standalone --nproc_per_node=8` under the hood.
+
+### 3. Re-Evaluate The Exported Artifact Under The Eval Path
+
+Use a separate eval run so you have an exact artifact-reload result and wall-clock number for evaluation:
+
+```bash
+ARTIFACT_PATH=./runs/runpod_h100_8x_10min/h100_8x_trial/submission_bundle \
+RUN_ID=h100_8x_eval \
+bash scripts/run_h100_8x_eval.sh
+```
+
+### 4. Package A Candidate Records Folder
+
+```bash
+uv run pgolf-package-submission \
+  --train_results_json ./runs/runpod_h100_8x_10min/h100_8x_trial/results.json \
+  --eval_results_json ./runs/runpod_h100_8x_eval/h100_8x_eval/results.json \
+  --track track_10min_16mb \
+  --name "My Candidate" \
+  --author "Your Name" \
+  --github_id your-github-id \
+  --blurb "Short summary of the method."
+```
+
+This creates:
+
+- `./submission_candidates/track_10min_16mb/<date>_<slug>/README.md`
+- `./submission_candidates/track_10min_16mb/<date>_<slug>/submission.json`
+- `./submission_candidates/track_10min_16mb/<date>_<slug>/train_gpt.py`
+- copied run logs, configs, manifests, and results JSONs
+
+The package is intended to match the official Parameter Golf PR shape:
+
+- `README.md`
+- `submission.json`
+- train log(s)
+- `train_gpt.py` and any counted dependencies  
+Source: [official README](https://github.com/openai/parameter-golf/blob/main/README.md)
+
+Important caveats from the official rules:
+
+- record-track runs must train in under `10 minutes` on `8xH100`
+- evaluation has its own separate `10 minute` limit
+- artifact size is `code bytes + compressed model bytes`
+- all counted code should live in `train_gpt.py`
+- no external downloads, dataset access, or network calls are allowed during evaluation  
+Source: [official README](https://github.com/openai/parameter-golf/blob/main/README.md)
+
 This serves the autoresearch run tree on port `6006` and lets you compare current and previous runs in one place.
 
 Each run writes TensorBoard events under:

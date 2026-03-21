@@ -16,6 +16,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import compare_runs
+import package_submission_candidate
 import train as mod
 import watch_run
 
@@ -679,6 +680,162 @@ def test_watch_codex_autoresearch_snapshot_and_once_script(tmp_path: Path) -> No
     assert "codex-loop watcher" in proc.stdout
     assert "iteration 1 body" in proc.stdout
     assert "completed one iteration" in proc.stdout
+
+
+def test_package_submission_candidate_prefers_eval_results_and_writes_record_folder(tmp_path: Path) -> None:
+    train_run_dir = tmp_path / "runs" / "train_run"
+    eval_run_dir = tmp_path / "runs" / "eval_run"
+    artifact_dir = train_run_dir / "submission_bundle"
+    code_dir = artifact_dir / "code"
+    code_dir.mkdir(parents=True, exist_ok=True)
+
+    train_script = code_dir / "train.py"
+    train_script.write_text("print('hello from train script')\n", encoding="utf-8")
+    manifest = {
+        "schema_version": mod.ARTIFACT_MANIFEST_VERSION,
+        "run_id": "train_run",
+        "config_hash": "cfg-train",
+        "model_config": mod._jsonable(mod.ModelConfig()),
+        "quant_config": mod._jsonable(mod.QuantConfig()),
+        "counted_files": [
+            {
+                "source_path": str(Path(__file__).parent / "train.py"),
+                "artifact_relpath": "code/train.py",
+                "bytes": train_script.stat().st_size,
+                "sha256": mod.sha256_file(train_script),
+            }
+        ],
+        "compressed_model": {
+            "artifact_relpath": "model_int8.zlib",
+            "bytes": 1234,
+            "sha256": "abc",
+        },
+        "byte_counts": {
+            "compressed_model_bytes": 1234,
+            "code_bytes": train_script.stat().st_size,
+            "artifact_bytes": 1234 + train_script.stat().st_size,
+            "quant_payload_bytes": 4321,
+        },
+        "quant_stats": {},
+        "param_count": 1,
+        "effective_depth": 10,
+        "latest_val": {"val_loss": 2.0, "val_bpb": 1.4, "token_count": 1, "byte_count": 1, "eval_seconds": 1.0},
+    }
+    (artifact_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (artifact_dir / "model_int8.zlib").write_bytes(b"blob")
+
+    (train_run_dir / "config.json").write_text("{}", encoding="utf-8")
+    (train_run_dir / "export_stats.json").write_text("{}", encoding="utf-8")
+    (train_run_dir / "artifact_reload_eval.json").write_text(json.dumps({"val_bpb": 1.39}), encoding="utf-8")
+    (train_run_dir / "train.log").write_text("train log body\n", encoding="utf-8")
+    train_results = {
+        "schema_version": mod.RESULTS_SCHEMA_VERSION,
+        "status": "success",
+        "mode": "train",
+        "run_id": "train_run",
+        "config_hash": "cfg-train",
+        "output_dir": str(train_run_dir),
+        "results_path": str(train_run_dir / "results.json"),
+        "config_path": str(train_run_dir / "config.json"),
+        "started_at_unix": 0.0,
+        "finished_at_unix": 1.0,
+        "training_seconds": 600.0,
+        "total_seconds": 620.0,
+        "peak_vram_mb": 1.0,
+        "mfu_percent": 0.0,
+        "total_tokens": 1,
+        "total_tokens_M": 0.000001,
+        "num_steps": 100,
+        "num_params": 1,
+        "num_params_M": 0.000001,
+        "depth": 10,
+        "train_loss": 2.5,
+        "val_loss": 2.0,
+        "val_bpb": 1.40,
+        "artifact_bytes": manifest["byte_counts"]["artifact_bytes"],
+        "artifact": {
+            "artifact_dir": str(artifact_dir),
+            "manifest_path": str(artifact_dir / "manifest.json"),
+            "model_blob_path": str(artifact_dir / "model_int8.zlib"),
+            "compressed_model_bytes": manifest["byte_counts"]["compressed_model_bytes"],
+            "code_bytes": manifest["byte_counts"]["code_bytes"],
+            "artifact_bytes": manifest["byte_counts"]["artifact_bytes"],
+            "quant_payload_bytes": manifest["byte_counts"]["quant_payload_bytes"],
+            "reload_val_loss": 2.01,
+            "reload_val_bpb": 1.39,
+        },
+        "benchmark": None,
+        "checkpoint_path": None,
+        "metrics_path": str(train_run_dir / "metrics.jsonl"),
+        "tensorboard_log_dir": str(train_run_dir / "tensorboard"),
+        "resume_from": None,
+    }
+    (train_run_dir / "results.json").write_text(json.dumps(train_results, indent=2), encoding="utf-8")
+
+    eval_run_dir.mkdir(parents=True, exist_ok=True)
+    (eval_run_dir / "config.json").write_text("{}", encoding="utf-8")
+    (eval_run_dir / "eval.log").write_text("eval log body\n", encoding="utf-8")
+    eval_results = dict(train_results)
+    eval_results.update(
+        {
+            "mode": "eval",
+            "run_id": "eval_run",
+            "config_hash": "cfg-eval",
+            "output_dir": str(eval_run_dir),
+            "results_path": str(eval_run_dir / "results.json"),
+            "config_path": str(eval_run_dir / "config.json"),
+            "training_seconds": 0.0,
+            "total_seconds": 55.0,
+            "num_steps": 0,
+            "train_loss": None,
+            "val_loss": 1.91,
+            "val_bpb": 1.23456789,
+            "metrics_path": str(eval_run_dir / "metrics.jsonl"),
+            "tensorboard_log_dir": str(eval_run_dir / "tensorboard"),
+        }
+    )
+    (eval_run_dir / "results.json").write_text(json.dumps(eval_results, indent=2), encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "package_submission_candidate.py",
+            "--train_results_json",
+            str(train_run_dir / "results.json"),
+            "--eval_results_json",
+            str(eval_run_dir / "results.json"),
+            "--track",
+            "track_10min_16mb",
+            "--name",
+            "Test Candidate",
+            "--author",
+            "Tester",
+            "--github_id",
+            "tester",
+            "--blurb",
+            "Test package blurb.",
+            "--output_root",
+            str(tmp_path / "submission_candidates"),
+        ],
+        cwd=Path(__file__).parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(proc.stdout)
+    package_dir = Path(payload["package_dir"])
+    assert (package_dir / "train_gpt.py").is_file()
+    assert (package_dir / "submission.json").is_file()
+    assert (package_dir / "README.md").is_file()
+    assert (package_dir / "train_runs" / "train_run" / "train.log").is_file()
+    assert (package_dir / "eval_runs" / "eval_run" / "eval.log").is_file()
+
+    submission = json.loads((package_dir / "submission.json").read_text(encoding="utf-8"))
+    assert math.isclose(submission["val_bpb"], 1.23456789)
+    assert submission["artifact_bytes"] == manifest["byte_counts"]["artifact_bytes"]
+    readme = (package_dir / "README.md").read_text(encoding="utf-8")
+    assert "Test package blurb." in readme
+    assert "train_gpt.py" in readme
 
 
 def test_autoresearch_index_script_updates_latest_and_best(tmp_path: Path) -> None:

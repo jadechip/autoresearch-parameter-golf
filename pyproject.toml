@@ -29,6 +29,7 @@ pgolf-prepare = "prepare:main"
 pgolf-train = "train:main"
 pgolf-validate-results = "validate_results:main"
 pgolf-summarize-artifact = "summarize_artifact:main"
+pgolf-package-submission = "package_submission_candidate:main"
 pgolf-monitor = "watch_run:main"
 pgolf-watch-run = "watch_run:main"
 pgolf-compare-runs = "compare_runs:main"
@@ -36,6 +37,7 @@ pgolf-compare-runs = "compare_runs:main"
 [tool.setuptools]
 py-modules = [
   "compare_runs",
+  "package_submission_candidate",
   "train",
   "prepare",
   "validate_results",
