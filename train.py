@@ -164,8 +164,6 @@ class TrainConfig:
     train_batch_tokens: int = 524_288
     val_batch_tokens: int = 524_288
     grad_accum_steps: int = 1
-    train_seq_len_min: int | None = None
-    train_seq_len_warmup_steps: int = 0
     log_every: int = 100
     val_every: int = 1_000
     eval_first_step: bool = True
@@ -820,43 +818,6 @@ def rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg: TrainConfig) -> N
     model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 6
 
 
-def extend_context_on_compact_tail3_8x_line_with_short_warmup(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != 20:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    if cfg.grad_accum_steps != 4:
-        return
-    if cfg.train_batch_tokens != 122_880 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min is not None or cfg.train_seq_len_warmup_steps != 0:
-        return
-    model_cfg.seq_len = 832
-    cfg.train_batch_tokens = 119_808
-    cfg.val_batch_tokens = 119_808
-    cfg.train_seq_len_min = 768
-    cfg.train_seq_len_warmup_steps = 160
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -1143,16 +1104,6 @@ def validate_results_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 def load_and_validate_results(path: str | Path) -> Mapping[str, Any]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     return validate_results_payload(payload)
-
-
-def train_seq_len_for_step(cfg: TrainConfig, step: int) -> int:
-    if cfg.train_seq_len_min is None or cfg.train_seq_len_warmup_steps <= 0:
-        return cfg.model.seq_len
-    if cfg.train_seq_len_min >= cfg.model.seq_len:
-        return cfg.model.seq_len
-    if step >= cfg.train_seq_len_warmup_steps:
-        return cfg.model.seq_len
-    return cfg.train_seq_len_min
 
 
 def metric_str(value: Any) -> str:
@@ -2676,14 +2627,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("vocab_size must be positive")
     if cfg.model.seq_len <= 0:
         raise ConfigError("seq_len must be positive")
-    if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
-        raise ConfigError("train_seq_len_min must be positive when set")
-    if cfg.train_seq_len_min is not None and cfg.train_seq_len_min > cfg.model.seq_len:
-        raise ConfigError("train_seq_len_min must be <= seq_len")
-    if cfg.train_seq_len_min is None and cfg.train_seq_len_warmup_steps != 0:
-        raise ConfigError("train_seq_len_warmup_steps requires train_seq_len_min")
-    if cfg.train_seq_len_warmup_steps < 0:
-        raise ConfigError("train_seq_len_warmup_steps must be >= 0")
     if cfg.model.non_recurrent_mlp_hidden_bonus is not None and cfg.model.non_recurrent_mlp_hidden_bonus < 0:
         raise ConfigError("non_recurrent_mlp_hidden_bonus must be >= 0 when set")
     if cfg.model.shared_mlp_hidden_bonus < 0:
@@ -2698,8 +2641,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("train_batch_tokens must be divisible by grad_accum_steps")
     if cfg.local_batch_tokens % cfg.model.seq_len != 0:
         raise ConfigError("train_batch_tokens / grad_accum_steps must be divisible by seq_len")
-    if cfg.train_seq_len_min is not None and cfg.local_batch_tokens % cfg.train_seq_len_min != 0:
-        raise ConfigError("train_batch_tokens / grad_accum_steps must be divisible by train_seq_len_min")
     if cfg.val_batch_tokens <= 0:
         raise ConfigError("val_batch_tokens must be positive")
     if cfg.val_every < 0:
@@ -2723,8 +2664,6 @@ def validate_runtime_config(cfg: TrainConfig, world_size: int) -> None:
     local_tokens = cfg.train_batch_tokens // (world_size * cfg.grad_accum_steps)
     if local_tokens % cfg.model.seq_len != 0:
         raise ConfigError("per-rank train batch must be divisible by seq_len")
-    if cfg.train_seq_len_min is not None and local_tokens % cfg.train_seq_len_min != 0:
-        raise ConfigError("per-rank train batch must be divisible by train_seq_len_min")
     if cfg.val_batch_tokens % world_size != 0:
         raise ConfigError("val_batch_tokens must be divisible by world_size")
     if (cfg.val_batch_tokens // world_size) < cfg.model.seq_len:
@@ -2875,10 +2814,9 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
             for opt in opt_bundle.all():
                 opt.zero_grad(set_to_none=True)
 
-            train_seq_len = train_seq_len_for_step(cfg, step)
             total_loss = 0.0
             for _micro in range(cfg.grad_accum_steps):
-                x, y = train_loader.next_batch(cfg.train_batch_tokens, train_seq_len, cfg.grad_accum_steps)
+                x, y = train_loader.next_batch(cfg.train_batch_tokens, cfg.model.seq_len, cfg.grad_accum_steps)
                 with maybe_autocast(device, enabled=True):
                     _, loss = wrapped_model(x, y)
                 if loss is None:
@@ -2909,11 +2847,10 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     "scalar_lr": current_optimizer_lr(opt_bundle.scalar),
                 }
                 print(
-                    "[train] step={} loss={:.6f} depth={} train_seq_len={} step_seconds={:.4f}".format(
+                    "[train] step={} loss={:.6f} depth={} step_seconds={:.4f}".format(
                         step,
                         last_train_loss,
                         cfg.model.effective_depth,
-                        train_seq_len,
                         step_seconds,
                     )
                 )
@@ -2928,7 +2865,6 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                         "num_steps": completed_steps,
                         "depth": cfg.model.effective_depth,
                         "train_loss": last_train_loss,
-                        "train_seq_len": train_seq_len,
                         "step_seconds": step_seconds,
                         "elapsed_training_seconds": training_elapsed_prior + (time.time() - training_start),
                         "total_tokens": total_tokens,
@@ -3558,7 +3494,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     trade_one_more_tail_block_for_12x_tail_mlp_on_compact_seq640_line(cfg)
     extend_context_on_compact_tail2_12x_line(cfg)
     rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg)
-    extend_context_on_compact_tail3_8x_line_with_short_warmup(cfg)
     return cfg
 
 
