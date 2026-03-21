@@ -69,19 +69,30 @@ Rules:
 - Treat runs/autoresearch_5090/index/best.json as numeric telemetry, not the sole source of truth for accepted state.
 - Architecture changes inside the current decoder-only / tied-embedding / GQA / RoPE / RMSNorm / ReLU^2 baseline family are allowed and encouraged.
 - Do not chase 5090-only hacks that are unlikely to matter on H100.
-- Treat `COMPETITIVE_PRIORS.md` as the current research brief. The recovered compact baseline materially under-spends the hard `16 MB` cap, so prefer deliberate capacity spending and leaderboard-informed search over more shrinkage.
+- Treat `COMPETITIVE_PRIORS.md` as the current research brief. The recovered compact baseline is now in the wrong regime for a likely win, so prefer deliberate capacity spending and leaderboard-informed search over more shrinkage.
 - If accepted artifact size remains below the search-policy target band, prefer bounded architecture and byte-allocation experiments over endless optimizer micro-tuning.
 - The first search block in a fresh session should cover structural axes before long micro-tuning streaks: `d_model`, `shared_layers` vs `recurrence_loops`, `tail_layers`, `mlp_mult`, `adapter_rank` / `adapter_targets`, and fake-quant timing / clip percentile.
 - Do not spend more than the search-policy limit of consecutive losing micro-tuning experiments without making the next run a structural or byte-allocation experiment.
-- Prioritize larger, leaderboard-aligned experiments that are still implementable inside `train.py`:
-  - mixed low-bit quantization beyond MLP-only export
-  - selective wider MLP allocations instead of blanket global `mlp_mult=3`
-  - longer context or sliding-window eval if compute is reclaimed elsewhere
+- Split the next campaign into a few clean branches instead of one blended soup:
+  - Branch A: near-full-budget carrier with lower recurrence, more unique depth, wider MLPs, and compute-aware context
+  - Branch B: late selective quantization or post-quant checkpoint soup on top of a stronger carrier
+  - Branch C: low-rank Q as a structural reallocation tool
+  - Branch D: smarter local-token module, one family at a time
+- Prioritize immediate directions that fit the current repo:
+  - low-rank Q
+  - late selective coarse-group quantization
   - selective higher precision for embeddings / head
-  - stronger optimizer bundles only after a structural candidate exists
-  - frontier-style initialization or gating ideas that fit this repo
-- Deprioritize ideas that already lost on the compact line unless paired with a new major hypothesis:
-  - blunt `d_model` widening
+  - compute-aware batch / context curricula
+  - simpler local-token modules
+- Treat these as stretch directions unless the simpler branches are working:
+  - XSA
+  - cross-window or top-layer KV cache
+  - SmearGate + TTT-style branches
+  - Canon inserts
+- Deprioritize ideas that already lost or are now strategically low value:
+  - more recurrence/shared-core looping as a main direction
+  - tiny-model compression tricks
+  - blunt `d_model` widening on the compact line
   - full `num_kv_heads=8`
   - near-neighbor context increases above `768` without compute reclamation
   - compensated global `mlp_mult=3`

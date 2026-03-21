@@ -32,13 +32,26 @@ The search reached this by:
 3. extending context from `640` to `768`
 4. rebalancing `1x2 + tail=2 + 12x tail` into `1x1 + tail=3 + 8x tail`
 
-## What Seems Repeatedly Good
+## Regime Change
+
+This compact line is a useful local optimum, but it is now in the wrong regime for a likely win.
+
+The current frontier is concentrated much closer to the hard artifact ceiling with:
+
+- near-full-budget carriers
+- more unique depth
+- more aggressive low-bit compression
+- longer context and eval-time tricks
+
+So the goal of the next 5090 campaign is not to keep polishing or shrinking this compact line. The goal is to move onto a stronger carrier family while keeping the fixed-budget 5090 loop honest.
+
+## What Seems Repeatedly Good In This Repo
 
 - Deliberate depth-to-width reallocation can win when it also improves fixed-budget throughput.
 - Larger unique-tail MLPs matter more than broad global `mlp_mult` changes.
 - Compact models that fit more steps into the fixed 5090 budget can dominate heavier lines.
 - Longer context helped up to `seq_len=768`.
-- The current accepted line is still small relative to the hard `16 MB` cap, so there is room to spend bytes deliberately.
+- The current accepted line is still materially below the hard `16 MB` cap, so there is room to spend bytes deliberately.
 
 ## What Seems Repeatedly Bad
 
@@ -64,31 +77,110 @@ The current leaderboard frontier is much better than this line and clusters arou
 Our search has covered some of this, but not enough. In particular, we have not yet seriously explored:
 
 - mixed low-bit quantization beyond MLP-only int6 export
-- a clean leaderboard-style `~3x` MLP family that still fits the 5090 budget
+- a clean leaderboard-style near-full-budget carrier that still fits the 5090 budget
+- low-rank Q as a structural reallocation tool
+- compute-aware context curricula
 - sliding-window eval
 - stronger optimizer bundles with WD / SWA after choosing a structural candidate
 - train-time init / gating ideas like OrthoInit or smear-like residual gating
 
+## Actionable Campaign Branches
+
+Do not stack every local-context trick into one line. Split the next campaign into a few clean branches.
+
+### Branch A: Near-Full-Budget Carrier
+
+Default target:
+
+- artifact band roughly `12 MB` to `15.5 MB`
+- low recurrence (`0` or `1` loop)
+- more unique depth
+- `d_model=512`
+- meaningfully wider MLPs
+- `seq_len` trending toward `1024`, `1536`, then `2048` if compute allows
+
+Primary knobs:
+
+- unique depth vs repeated depth
+- selective MLP width allocation
+- batch shrink for more steps
+- context curriculum
+
+### Branch B: Late Selective Quantization
+
+Focus on coarse, compression-friendly groups rather than fancy heterogeneous precision:
+
+- embeddings / head
+- early attention
+- late attention
+- middle MLPs
+- final MLPs
+
+The promising direction is:
+
+- later fake quant, not earlier
+- selective groups, not blanket QAT
+- coarse schemes that still compress well under zlib / zstd-style packing
+
+Also consider a no-QAT branch with checkpoint soup / PTQ selection under post-quant proxy loss.
+
+### Branch C: Low-Rank Q Reallocation
+
+This is the cleanest structural differentiation axis that still looks plausible:
+
+- factor Q to buy either more unique depth, a better local module, or more steps
+- combine with a stronger carrier rather than using it alone
+
+### Branch D: Smarter Local-Token Module
+
+Treat this as a separate branch, not something to stack on everything else immediately:
+
+- top-N exact bigram plus hashed tail
+- factorized bigram projection
+- simple two-scale local token features
+
+Do not assume raw BigramHash scaling is the best byte/quality trade.
+
+## Feasibility Tiers In This Repo
+
+Immediate / current `train.py` scope:
+
+- low-rank Q
+- late selective coarse-group quantization
+- selective embedding / head precision
+- compute-aware batch / context curricula
+- checkpoint soup or selective post-quant snapshot choice
+- simpler local-token modules
+
+Medium complexity:
+
+- sliding-window eval
+- partial RoPE variants
+- train-time init or gating changes
+
+Stretch ideas for later, not first 5090 restart:
+
+- XSA
+- cross-window neural cache / top-layer KV cache
+- SmearGate + meta-TTT branch
+- Canon inserts
+
 ## Next Search Directions
 
-Prioritize larger, leaderboard-informed experiments over more local hill-climbing:
+For the next serious 5090 restart:
 
-1. Spend bytes upward from the recovered `~7.3 MB` baseline toward roughly `9 MB` to `14 MB`, but only with a clear structural hypothesis.
-2. Explore mixed low-bit quantization on more matrices so saved bytes can be reinvested into width or unique depth.
-3. Revisit wider MLPs, but selectively:
-   - unique-tail-only
-   - specific repeated/shared blocks
-   - compensated depth/width reallocations
-   Do not just set global `mlp_mult=3` on the whole stack again.
-4. Explore context/eval as a first-class axis:
-   - longer `seq_len` if compute is reclaimed elsewhere
-   - sliding-window eval if it remains competition-valid
-5. Explore selective higher precision for embeddings / head if the byte cost is justified.
-6. Explore frontier-style train-time helpers that still fit in `train.py`, such as better initialization, residual mixing, or smear-like gating.
-7. Only after a stronger structural candidate exists, run optimizer bundles with Muon momentum, weight decay, warmdown, and possibly SWA.
+1. Spend bytes upward from the recovered `~7.3 MB` baseline toward roughly `12 MB` to `15.5 MB`, not `8 MB`.
+2. Stop treating recurrence or tiny-model compression as the main axis.
+3. Prefer moving onto a stronger carrier before stacking eval-time tricks.
+4. Explore low-rank Q, selective wider MLPs, and compute-aware context together, but one branch at a time.
+5. Use late selective quantization as a second-stage optimization on top of a better carrier, not the first move.
+6. Treat sliding eval and cache ideas as separate branches, not automatic add-ons.
 
 ## Search Guardrails
 
 - Do not spend the next search block on tiny hidden-bonus retunes.
 - Do not assume the smallest artifact is the best model. The recovered baseline materially under-spends the hard cap.
 - Prefer experiments that could plausibly matter on `8xH100`, not just on the 5090 proxy.
+- Do not stack every local-context trick into one line.
+- Do not keep revisiting recurrence, shared-core looping, or tiny-model compression as a main line of attack.
+- Avoid doc-isolated eval at stride 64 as a standalone trick.

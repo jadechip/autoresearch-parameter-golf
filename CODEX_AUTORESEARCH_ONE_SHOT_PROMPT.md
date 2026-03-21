@@ -52,18 +52,30 @@ Constraints:
 
 Search policy:
 - treat `runs/autoresearch_5090/index/best.json` as numeric telemetry, not the sole truth of accepted state
-- treat `COMPETITIVE_PRIORS.md` as the current research brief; the recovered compact baseline materially under-spends the hard `16 MB` cap, so bias toward deliberate capacity spending rather than more shrinkage
+- treat `COMPETITIVE_PRIORS.md` as the current research brief; the recovered compact baseline is now in the wrong regime for a likely win, so bias toward a stronger carrier instead of more shrinkage
 - if accepted artifact size is below the target band in `.autoresearch/session.json`, prefer bounded architecture / byte-allocation experiments over endless optimizer micro-tuning
 - in a fresh session, cover structural axes early: `d_model`, `shared_layers` vs `recurrence_loops`, `tail_layers`, `mlp_mult`, `adapter_rank` / `adapter_targets`, fake-quant timing / clip percentile
 - do not spend more than the search-policy limit of consecutive losing micro-tuning experiments without making the next run structural or byte-allocation oriented
 - use `.autoresearch/notes.md` as the durable hypothesis ledger
-- prioritize leaderboard-aligned directions that still fit `train.py`:
-  - mixed low-bit quantization beyond MLP-only export
-  - selective wider MLP allocations instead of blanket global `mlp_mult=3`
-  - longer context or sliding-window eval if compute is reclaimed
+- split the campaign into clean branches instead of one blended soup:
+  - near-full-budget carrier
+  - late selective quantization / post-quant soup
+  - low-rank Q
+  - smarter local-token module
+- prioritize immediate directions that fit the current repo:
+  - low-rank Q
+  - late selective coarse-group quantization
   - selective higher precision for embeddings / head
-  - frontier-style init or gating ideas
-- deprioritize ideas that already lost on the compact line unless paired with a new major hypothesis:
+  - compute-aware batch / context curricula
+  - simpler local-token modules
+- treat these as stretch directions unless simpler branches start working:
+  - XSA
+  - cross-window or top-layer KV cache
+  - SmearGate + TTT-style branches
+  - Canon inserts
+- deprioritize strategically low-value directions:
+  - more recurrence/shared-core looping as a main direction
+  - tiny-model compression tricks
   - blunt `d_model` widening
   - full `num_kv_heads=8`
   - near-neighbor context increases above `768` without compute reclamation

@@ -103,6 +103,7 @@ Current recovered search baseline:
 - the last trusted compact 5090 winner was a `seq_len=768`, `1 shared x 1 loop`, `tail=3`, `8x` unique-tail MLP line at about `7.26 MB`
 - that materially under-spends the hard `16 MB` cap
 - do not assume the best next move is to keep shrinking the model
+- do not assume more recurrence is the right frontier direction either
 
 ## Production-Proxy Objective
 
@@ -122,7 +123,7 @@ This repo's current compact 5090 baseline materially under-spends the final arti
 
 Use the search policy recorded in `.autoresearch/session.json`:
 
-- soft artifact target band for 5090 search: `8,000,000` to `14,000,000` bytes
+- soft artifact target band for 5090 search: `12,000,000` to `15,500,000` bytes
 - meaningful improvement threshold: about `0.001 val_bpb`
 - maximum consecutive losing micro-tuning runs before a required structural follow-up: `3`
 
@@ -148,12 +149,29 @@ If artifact usage remains far below the cap, prefer bounded architecture / byte-
 
 Prioritize leaderboard-aligned directions that still fit inside `train.py`:
 
+- low-rank Q as a structural reallocation tool
 - mixed low-bit quantization beyond MLP-only export
 - selective higher-precision embeddings / head
 - selective or compensated `~3x` MLP families rather than blanket global `mlp_mult=3`
 - longer context or sliding-window eval when compute is reclaimed elsewhere
+- compute-aware batch / context curricula
 - stronger optimizer bundles with Muon momentum, weight decay, warmdown, and possibly SWA after a structural candidate exists
 - frontier-style initialization or gating ideas that are local to `train.py`
+- simpler local-token modules with better byte/quality tradeoffs than raw scaling of the current line
+
+Split the next serious search into clean branches instead of one blended stack:
+
+- near-full-budget carrier
+- late selective quantization / post-quant soup
+- low-rank Q
+- smarter local-token module
+
+Treat these as stretch directions unless the simpler branches are working:
+
+- XSA
+- cross-window or top-layer KV cache
+- SmearGate + TTT-style branches
+- Canon inserts
 
 In a fresh session, the first search block should deliberately cover structural axes before settling into local hill-climbing:
 
@@ -170,7 +188,9 @@ Avoid spending time on:
 - changes that mainly exploit logging / harness quirks
 - high-complexity tweaks for tiny gains
 - changes that make final single-script submission meaningfully uglier
-- repeating known-losing compact-line moves without a new major hypothesis:
+- repeating known-losing or strategically low-value moves without a new major hypothesis:
+  - more recurrence/shared-core looping as a main direction
+  - tiny-model compression tricks
   - blunt `d_model` widening
   - full `num_kv_heads=8`
   - near-neighbor context increases above `768` without compute reclamation

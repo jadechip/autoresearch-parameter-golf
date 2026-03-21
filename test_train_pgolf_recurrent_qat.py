@@ -913,8 +913,8 @@ def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path) -> None
     assert session["status"] == "ready"
     assert session["accepted_run_id"] == "baseline"
     assert session["accepted_artifact_bytes"] == 1
-    assert session["search_policy"]["artifact_target_bytes_min"] == 8_000_000
-    assert session["search_policy"]["artifact_target_bytes_max"] == 14_000_000
+    assert session["search_policy"]["artifact_target_bytes_min"] == 12_000_000
+    assert session["search_policy"]["artifact_target_bytes_max"] == 15_500_000
     assert session["search_policy"]["max_consecutive_losing_micro_experiments"] == 3
     assert session["search_policy"]["external_priors"]
     assert session["search_policy"]["next_priority_axes"]

@@ -62,7 +62,7 @@ Once that file exists, non-baseline autoresearch runs are gated on `session.json
 
 The session file also carries the current search policy for Codex, including:
 
-- a soft 5090 artifact target band of `7,000,000` to `12,000,000` bytes
+- a soft 5090 artifact target band of `12,000,000` to `15,500,000` bytes
 - a `~0.001 val_bpb` meaningful-win threshold
 - a limit of `3` consecutive losing micro-tunes before the next run should be structural
 

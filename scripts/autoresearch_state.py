@@ -13,8 +13,8 @@ from train import append_jsonl, atomic_write_json, load_and_validate_results
 SESSION_SCHEMA_VERSION = "pgolf.autoresearch_session.v1"
 EXPERIMENT_LOG_SCHEMA_VERSION = "pgolf.autoresearch_experiment.v1"
 SEARCH_MIN_MEANINGFUL_BPB_GAIN = 0.001
-SEARCH_ARTIFACT_TARGET_BYTES_MIN = 8_000_000
-SEARCH_ARTIFACT_TARGET_BYTES_MAX = 14_000_000
+SEARCH_ARTIFACT_TARGET_BYTES_MIN = 12_000_000
+SEARCH_ARTIFACT_TARGET_BYTES_MAX = 15_500_000
 SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS = 3
 SEARCH_STRUCTURAL_AXES = [
     "d_model",
@@ -25,25 +25,26 @@ SEARCH_STRUCTURAL_AXES = [
     "fake_quant_start_step_and_clip_percentile",
 ]
 SEARCH_EXTERNAL_PRIORS = [
-    "The recovered compact 5090 baseline is materially under the hard 16 MB cap, so the next search block should spend bytes deliberately instead of continuing to shrink the model.",
-    "Top leaderboard entries cluster around 10-11 layers, roughly 2.6x-3x MLPs, mixed low-bit quantization, and stronger training/eval tricks rather than pure recurrence.",
-    "Mixed low-bit quantization beyond MLP-only export appears promising if the saved bytes are reinvested into width or unique depth.",
-    "Selective higher precision for embeddings or head appears promising.",
+    "The recovered compact 5090 baseline is now in the wrong regime for a likely win: the next serious search should move toward a stronger, near-full-budget carrier instead of more shrinkage.",
+    "Top leaderboard entries cluster around near-full-budget nonrecurrent carriers, mixed low-bit quantization, longer context, and stronger training/eval tricks rather than pure recurrence.",
+    "Low-rank Q is a promising structural reallocation tool because it can buy more unique depth, a stronger local module, or more steps.",
+    "Late selective coarse-group quantization is more promising than blanket early QAT or highly heterogeneous mixed-bit schemes.",
     "Longer context and sliding-window eval appear promising, but only if they remain competition-valid and fit the fixed budget.",
     "Optimizer bundles with Muon momentum, weight decay, warmdown, and possibly SWA should follow a stronger structural candidate, not replace one.",
 ]
 SEARCH_NEXT_PRIORITY_AXES = [
-    "selective width or depth spending that moves the accepted line toward roughly 9 MB to 14 MB",
-    "mixed low-bit quantization beyond MLP-only export",
+    "near-full-budget carrier with lower recurrence, more unique depth, and wider MLPs",
+    "low-rank Q as a structural reallocation tool",
+    "late selective coarse-group quantization or post-quant checkpoint soup",
     "selective higher precision for embeddings or head",
-    "longer context or sliding-window eval when compute is reclaimed",
-    "frontier-style initialization or gating ideas that fit train.py",
-    "optimizer bundles after a stronger structural candidate exists",
+    "compute-aware batch and context curricula",
+    "smarter local-token modules with better byte/quality tradeoffs",
 ]
 SEARCH_DO_NOT_OVERWEIGHT = [
     "Do not cargo-cult leaderboard entries.",
     "Treat public leaderboard patterns as priors, not recipes.",
     "Do not repeat known-losing compact-line moves without a new major hypothesis.",
+    "Do not keep using recurrence or tiny-model compression as the main search direction.",
 ]
 
 
@@ -159,7 +160,8 @@ def ensure_notes_file(state_dir: Path) -> None:
         "- [ ] fake_quant_start_step / clip_percentile\n\n"
         "Frontier priors:\n"
         "- Spend bytes deliberately if the accepted line is still well below the hard `16 MB` cap.\n"
-        "- Mixed low-bit quantization, selective higher-precision embeddings, and larger MLP families are higher-priority than more shrinkage.\n"
+        "- Prefer a stronger near-full-budget carrier over more recurrence or more shrinkage.\n"
+        "- Low-rank Q, selective quantization, and compute-aware context are higher-priority than local tail-width retunes.\n"
         "- Longer context or sliding-window eval should only be tried when compute is reclaimed elsewhere.\n"
         "- Avoid repeating known-losing compact-line moves without a new major hypothesis.\n\n"
         "Hypothesis ledger:\n"
