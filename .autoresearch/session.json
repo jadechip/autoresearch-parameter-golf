@@ -13,7 +13,7 @@
   "current_branch": "autoresearch/20260319-181724",
   "current_experiment": null,
   "latest_artifact_bytes": 7181120,
-  "latest_decision": "accepted",
+  "latest_decision": "reverted",
   "latest_results_path": "/workspace/autoresearch-parameter-golf-ralph/runs/autoresearch_5090/runs/ar5090-20260321-040813/results.json",
   "latest_run_id": "ar5090-20260321-040813",
   "latest_status": "success",
@@ -84,5 +84,5 @@
   },
   "state_dir": "/workspace/autoresearch-parameter-golf-ralph/.autoresearch",
   "status": "ready",
-  "updated_at_unix": 1774066626.846082
+  "updated_at_unix": 1774067033.96448
 }
