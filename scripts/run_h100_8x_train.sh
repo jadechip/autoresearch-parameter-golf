@@ -10,6 +10,7 @@ SUBMISSION_TRAIN_ONLY="${SUBMISSION_TRAIN_ONLY:-1}"
 
 if [[ "$SUBMISSION_TRAIN_ONLY" == "1" ]]; then
   exec bash "$ROOT_DIR/scripts/run_h100_train.sh" \
+    --train_phase_only \
     --val_every 0 \
     --no_eval_first_step \
     --no_lawa \

@@ -176,6 +176,7 @@ class TrainConfig:
     save_final_quantized: bool = True
     verify_export_reload: bool = True
     evaluate_only: bool = False
+    train_phase_only: bool = False
     load_artifact_path: str | None = None
     benchmark_only: bool = False
     benchmark_train_steps: int = 3
@@ -2885,7 +2886,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     lr_now=lr_now,
                 )
 
-            validation_enabled = train_time_validation_enabled(cfg, val_tokens is not None)
+            validation_enabled = train_time_validation_enabled(cfg, val_tokens is not None and not cfg.train_phase_only)
 
             if validation_enabled and should_run_validation(step, target_iterations, cfg.val_every, cfg.eval_first_step):
                 barrier_if_needed()
@@ -2941,7 +2942,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     last_val=last_val,
                 )
 
-        validation_enabled = train_time_validation_enabled(cfg, val_tokens is not None)
+        validation_enabled = val_tokens is not None and not cfg.train_phase_only
 
         if should_run_post_loop_validation(validation_enabled, completed_steps, last_step, last_val_step):
             barrier_if_needed()
@@ -3369,6 +3370,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark_train_steps", type=int, default=None)
     parser.add_argument("--benchmark_eval_repeats", type=int, default=None)
     parser.add_argument("--evaluate_only", action="store_true")
+    parser.add_argument("--train_phase_only", action="store_true")
     return parser
 
 
@@ -3467,6 +3469,8 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         cfg.benchmark_only = True
     if args.evaluate_only:
         cfg.evaluate_only = True
+    if args.train_phase_only:
+        cfg.train_phase_only = True
     rebalance_shared_layers_vs_loops(cfg.model)
     expand_adapter_capacity(cfg.model)
     reallocate_one_shared_layer_into_tail(cfg.model)

@@ -199,6 +199,8 @@ def test_validation_schedule_helpers() -> None:
     cfg = mod.TrainConfig(val_every=0, eval_first_step=True)
     assert mod.train_time_validation_enabled(cfg, has_validation=True) is True
     assert mod.train_time_validation_enabled(cfg, has_validation=False) is False
+    cfg = mod.TrainConfig(train_phase_only=True)
+    assert cfg.train_phase_only is True
 
 
 def test_rebalance_compact_seq768_tail2_12x_line_into_tail3_8x() -> None:
