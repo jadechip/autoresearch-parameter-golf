@@ -102,6 +102,7 @@ class ModelConfig:
     adapter_alpha: float = 8.0
     adapter_targets: tuple[str, ...] = ("attn_out", "mlp_out")
     qk_gain_init: float = 1.0
+    q_low_rank: int = 0
     fake_quant_during_train: bool = True
     fake_quant_start_step: int = 50
     attn_dropout: float = 0.0
@@ -816,6 +817,40 @@ def rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg: TrainConfig) -> N
     model_cfg.tail_layers = 3
     model_cfg.shared_mlp_hidden_bonus = 0
     model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 6
+
+
+def reallocate_low_rank_q_into_wider_tail_on_recovered_compact_line(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
+        return
+    if model_cfg.q_low_rank != 0:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != 20:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    if cfg.grad_accum_steps != 4:
+        return
+    if cfg.train_batch_tokens != 122_880 or cfg.val_batch_tokens != 122_880:
+        return
+    model_cfg.q_low_rank = model_cfg.d_model // 4
+    model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 7
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -1618,6 +1653,47 @@ class FakeQuantLinear(nn.Module):
         return y
 
 
+class LowRankQProjection(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        *,
+        rank: int,
+        fake_quant_during_train: bool,
+        fake_quant_start_step: int,
+        num_adapter_slots: int = 0,
+        adapter_rank: int = 0,
+        adapter_alpha: float = 1.0,
+    ):
+        super().__init__()
+        self.rank = rank
+        self.down_proj = FakeQuantLinear(
+            in_features,
+            rank,
+            bias=False,
+            fake_quant_during_train=fake_quant_during_train,
+            fake_quant_start_step=fake_quant_start_step,
+        )
+        self.up_proj = FakeQuantLinear(
+            rank,
+            out_features,
+            bias=False,
+            fake_quant_during_train=fake_quant_during_train,
+            fake_quant_start_step=fake_quant_start_step,
+            num_adapter_slots=num_adapter_slots,
+            adapter_rank=adapter_rank,
+            adapter_alpha=adapter_alpha,
+        )
+
+    def set_global_step(self, step: int) -> None:
+        self.down_proj.set_global_step(step)
+        self.up_proj.set_global_step(step)
+
+    def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
+        return self.up_proj(self.down_proj(x), slot=slot)
+
+
 class GroupedQueryAttention(nn.Module):
     def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0):
         super().__init__()
@@ -1630,16 +1706,28 @@ class GroupedQueryAttention(nn.Module):
         self.num_kv_heads = cfg.num_kv_heads
         self.head_dim = cfg.d_model // cfg.num_heads
         self.rope = RotaryEmbedding(self.head_dim, base=cfg.rope_base)
-        self.q_proj = FakeQuantLinear(
-            cfg.d_model,
-            cfg.d_model,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-            num_adapter_slots=num_adapter_slots if has_adapter(cfg, "q") else 0,
-            adapter_rank=cfg.adapter_rank,
-            adapter_alpha=cfg.adapter_alpha,
-        )
+        if cfg.q_low_rank > 0:
+            self.q_proj = LowRankQProjection(
+                cfg.d_model,
+                cfg.d_model,
+                rank=cfg.q_low_rank,
+                fake_quant_during_train=cfg.fake_quant_during_train,
+                fake_quant_start_step=cfg.fake_quant_start_step,
+                num_adapter_slots=num_adapter_slots if has_adapter(cfg, "q") else 0,
+                adapter_rank=cfg.adapter_rank,
+                adapter_alpha=cfg.adapter_alpha,
+            )
+        else:
+            self.q_proj = FakeQuantLinear(
+                cfg.d_model,
+                cfg.d_model,
+                bias=False,
+                fake_quant_during_train=cfg.fake_quant_during_train,
+                fake_quant_start_step=cfg.fake_quant_start_step,
+                num_adapter_slots=num_adapter_slots if has_adapter(cfg, "q") else 0,
+                adapter_rank=cfg.adapter_rank,
+                adapter_alpha=cfg.adapter_alpha,
+            )
         self.k_proj = FakeQuantLinear(
             cfg.d_model,
             cfg.num_kv_heads * self.head_dim,
@@ -2631,6 +2719,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("non_recurrent_mlp_hidden_bonus must be >= 0 when set")
     if cfg.model.shared_mlp_hidden_bonus < 0:
         raise ConfigError("shared_mlp_hidden_bonus must be >= 0")
+    if cfg.model.q_low_rank < 0:
+        raise ConfigError("q_low_rank must be >= 0")
+    if cfg.model.q_low_rank >= cfg.model.d_model:
+        raise ConfigError("q_low_rank must be smaller than d_model")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.iterations <= 0:
@@ -3344,6 +3436,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--d_model", type=int, default=None)
     parser.add_argument("--num_heads", type=int, default=None)
     parser.add_argument("--num_kv_heads", type=int, default=None)
+    parser.add_argument("--q_low_rank", type=int, default=None)
     parser.add_argument("--stem_layers", type=int, default=None)
     parser.add_argument("--shared_layers", type=int, default=None)
     parser.add_argument("--recurrence_loops", type=int, default=None)
@@ -3420,6 +3513,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         "d_model",
         "num_heads",
         "num_kv_heads",
+        "q_low_rank",
         "stem_layers",
         "shared_layers",
         "recurrence_loops",
@@ -3494,6 +3588,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     trade_one_more_tail_block_for_12x_tail_mlp_on_compact_seq640_line(cfg)
     extend_context_on_compact_tail2_12x_line(cfg)
     rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg)
+    reallocate_low_rank_q_into_wider_tail_on_recovered_compact_line(cfg)
     return cfg
 
 
