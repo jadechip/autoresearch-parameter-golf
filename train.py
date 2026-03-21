@@ -527,33 +527,6 @@ def trade_one_tail_block_for_true_3x_tail_mlp_on_int6_baseline(cfg: TrainConfig)
     model_cfg.tail_layers = 7
 
 
-def widen_true_3x_tail_base_model(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 2 or model_cfg.tail_layers != 7:
-        return
-    if model_cfg.d_model != 512 or model_cfg.num_heads != 8 or model_cfg.num_kv_heads != 4:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 192:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != 20:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    model_cfg.d_model = 544
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -3207,7 +3180,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     retune_shifted_deep_tail_width_and_warmdown(cfg)
     use_int6_mlp_export_on_retuned_stemless_deep_tail(cfg)
     trade_one_tail_block_for_true_3x_tail_mlp_on_int6_baseline(cfg)
-    widen_true_3x_tail_base_model(cfg)
     return cfg
 
 
