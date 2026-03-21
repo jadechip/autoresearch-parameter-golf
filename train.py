@@ -102,6 +102,7 @@ class ModelConfig:
     adapter_alpha: float = 8.0
     adapter_targets: tuple[str, ...] = ("attn_out", "mlp_out")
     qk_gain_init: float = 1.0
+    tail_local_kernel: int = 0
     fake_quant_during_train: bool = True
     fake_quant_start_step: int = 50
     attn_dropout: float = 0.0
@@ -816,6 +817,39 @@ def rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg: TrainConfig) -> N
     model_cfg.tail_layers = 3
     model_cfg.shared_mlp_hidden_bonus = 0
     model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 6
+
+
+def add_grouped_local_mixer_to_recovered_compact_tail(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
+        return
+    if model_cfg.tail_local_kernel != 0:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != 20:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    if cfg.grad_accum_steps != 4:
+        return
+    if cfg.train_batch_tokens != 122_880 or cfg.val_batch_tokens != 122_880:
+        return
+    model_cfg.tail_local_kernel = 5
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -1618,6 +1652,23 @@ class FakeQuantLinear(nn.Module):
         return y
 
 
+class GroupedCausalConv1d(nn.Module):
+    def __init__(self, dim: int, num_groups: int, kernel_size: int):
+        super().__init__()
+        if kernel_size <= 1:
+            raise ValueError("kernel_size must be > 1 for GroupedCausalConv1d")
+        if dim % num_groups != 0:
+            raise ValueError("dim must be divisible by num_groups for GroupedCausalConv1d")
+        self.kernel_size = kernel_size
+        self.conv = nn.Conv1d(dim, dim, kernel_size, groups=num_groups, bias=False)
+        nn.init.normal_(self.conv.weight, mean=0.0, std=0.02)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x_channels = x.transpose(1, 2)
+        x_padded = F.pad(x_channels, (self.kernel_size - 1, 0))
+        return self.conv(x_padded).transpose(1, 2)
+
+
 class GroupedQueryAttention(nn.Module):
     def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0):
         super().__init__()
@@ -1741,12 +1792,24 @@ class ReLU2MLP(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0, mlp_hidden_bonus: int = 0):
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        num_adapter_slots: int = 0,
+        mlp_hidden_bonus: int = 0,
+        local_mixer_kernel: int = 0,
+    ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
         self.mlp_norm = RMSNorm(cfg.d_model)
         self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots)
         self.mlp = ReLU2MLP(cfg, num_adapter_slots=num_adapter_slots, hidden_bonus=mlp_hidden_bonus)
+        if local_mixer_kernel > 1:
+            self.local_mixer = GroupedCausalConv1d(cfg.d_model, cfg.num_heads, local_mixer_kernel)
+            self.local_scale = nn.Parameter(torch.full((cfg.d_model,), 0.1))
+        else:
+            self.local_mixer = None
+            self.register_parameter("local_scale", None)
         scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
@@ -1763,7 +1826,10 @@ class TransformerBlock(nn.Module):
         return scale.to(dtype=x.dtype)
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
-        x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
+        attn_in = self.attn_norm(x)
+        if self.local_mixer is not None:
+            x = x + self.local_mixer(attn_in) * self.local_scale.to(dtype=x.dtype)
+        x = x + self.attn(attn_in, slot=slot) * self.residual_scale(self.attn_scale, x, slot)
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         return x
 
@@ -1793,7 +1859,15 @@ class RecurrentGPT(nn.Module):
             ]
         )
         self.tail = nn.ModuleList(
-            [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.tail_layers)]
+            [
+                TransformerBlock(
+                    cfg,
+                    num_adapter_slots=0,
+                    mlp_hidden_bonus=non_recurrent_hidden_bonus,
+                    local_mixer_kernel=cfg.tail_local_kernel,
+                )
+                for _ in range(cfg.tail_layers)
+            ]
         )
         self.final_norm = RMSNorm(cfg.d_model)
         self.lm_head = None if cfg.tie_embeddings else FakeQuantLinear(
@@ -2627,6 +2701,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("vocab_size must be positive")
     if cfg.model.seq_len <= 0:
         raise ConfigError("seq_len must be positive")
+    if cfg.model.tail_local_kernel < 0:
+        raise ConfigError("tail_local_kernel must be >= 0")
+    if cfg.model.tail_local_kernel == 1:
+        raise ConfigError("tail_local_kernel must be 0 or > 1")
     if cfg.model.non_recurrent_mlp_hidden_bonus is not None and cfg.model.non_recurrent_mlp_hidden_bonus < 0:
         raise ConfigError("non_recurrent_mlp_hidden_bonus must be >= 0 when set")
     if cfg.model.shared_mlp_hidden_bonus < 0:
@@ -3494,6 +3572,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     trade_one_more_tail_block_for_12x_tail_mlp_on_compact_seq640_line(cfg)
     extend_context_on_compact_tail2_12x_line(cfg)
     rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg)
+    add_grouped_local_mixer_to_recovered_compact_tail(cfg)
     return cfg
 
 
