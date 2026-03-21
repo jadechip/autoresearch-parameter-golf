@@ -2698,6 +2698,12 @@ def should_run_post_loop_validation(has_validation: bool, completed_steps: int, 
     return has_validation and completed_steps > 0 and last_val_step != last_step
 
 
+def train_time_validation_enabled(cfg: TrainConfig, has_validation: bool) -> bool:
+    if not has_validation:
+        return False
+    return cfg.eval_first_step or cfg.val_every > 0
+
+
 def train_one_run(cfg: TrainConfig) -> RunSummary:
     validate_config(cfg)
     started_at = time.time()
@@ -2878,7 +2884,9 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     lr_now=lr_now,
                 )
 
-            if val_tokens is not None and should_run_validation(step, target_iterations, cfg.val_every, cfg.eval_first_step):
+            validation_enabled = train_time_validation_enabled(cfg, val_tokens is not None)
+
+            if validation_enabled and should_run_validation(step, target_iterations, cfg.val_every, cfg.eval_first_step):
                 barrier_if_needed()
                 last_val = eval_val(
                     cfg=cfg,
@@ -2932,7 +2940,9 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     last_val=last_val,
                 )
 
-        if should_run_post_loop_validation(val_tokens is not None, completed_steps, last_step, last_val_step):
+        validation_enabled = train_time_validation_enabled(cfg, val_tokens is not None)
+
+        if should_run_post_loop_validation(validation_enabled, completed_steps, last_step, last_val_step):
             barrier_if_needed()
             last_val = eval_val(
                 cfg=cfg,
@@ -2971,7 +2981,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
 
         if lawa is not None and lawa.count > 0:
             lawa.load_into(raw_model)
-            if val_tokens is not None:
+            if validation_enabled:
                 last_val = eval_val(
                     cfg=cfg,
                     model=wrapped_model,
@@ -3019,7 +3029,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                 cfg_hash=cfg_hash,
                 val_stats=last_val,
             )
-            if cfg.verify_export_reload and val_tokens is not None:
+            if cfg.verify_export_reload and validation_enabled:
                 reloaded_model, _manifest, _artifact_dir = load_model_from_artifact(output_dir / cfg.artifact_bundle_name, device)
                 reload_val = eval_val(
                     cfg=cfg,

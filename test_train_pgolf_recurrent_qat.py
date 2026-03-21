@@ -192,6 +192,13 @@ def test_validation_schedule_helpers() -> None:
     assert mod.should_run_validation(step=99, target_iterations=100, val_every=0, eval_first_step=False) is True
     assert mod.should_run_post_loop_validation(True, completed_steps=12, last_step=11, last_val_step=None) is True
     assert mod.should_run_post_loop_validation(True, completed_steps=12, last_step=11, last_val_step=11) is False
+    cfg = mod.TrainConfig(val_every=0, eval_first_step=False)
+    assert mod.train_time_validation_enabled(cfg, has_validation=True) is False
+    cfg = mod.TrainConfig(val_every=100, eval_first_step=False)
+    assert mod.train_time_validation_enabled(cfg, has_validation=True) is True
+    cfg = mod.TrainConfig(val_every=0, eval_first_step=True)
+    assert mod.train_time_validation_enabled(cfg, has_validation=True) is True
+    assert mod.train_time_validation_enabled(cfg, has_validation=False) is False
 
 
 def test_write_and_load_shard_roundtrip(tmp_path: Path) -> None:

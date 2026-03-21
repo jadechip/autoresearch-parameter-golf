@@ -175,6 +175,14 @@ RUN_ID=h100_8x_trial bash scripts/run_h100_8x_train.sh
 ARTIFACT_PATH=./runs/runpod_h100_8x_10min/h100_8x_trial/submission_bundle RUN_ID=h100_8x_eval bash scripts/run_h100_8x_eval.sh
 ```
 
+The `8xH100` train launcher defaults to submission-style timing:
+
+- no train-time periodic validation
+- no eval-first-step
+- no LAWA eval during the train phase
+
+This keeps the timed train run closer to the official challenge shape, where scoring happens in a separate eval pass.
+
 Then package a records-folder candidate:
 
 ```bash

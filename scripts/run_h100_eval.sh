@@ -18,9 +18,22 @@ if [[ -z "${ARTIFACT_PATH:-}" ]]; then
   exit 2
 fi
 
+artifact_dir="$ARTIFACT_PATH"
+if [[ ! -d "$artifact_dir" ]]; then
+  artifact_dir="$(dirname "$artifact_dir")"
+fi
+artifact_dir="$(cd "$artifact_dir" && pwd)"
+ARTIFACT_CONFIG_JSON="$(dirname "$artifact_dir")/config.json"
+
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 RUN_ID="${RUN_ID:-h100-eval-${NPROC_PER_NODE}x-${STAMP}}"
-CONFIG_JSON="${CONFIG_JSON:-$DEFAULT_CONFIG_JSON}"
+if [[ -n "${CONFIG_JSON:-}" ]]; then
+  CONFIG_JSON="$CONFIG_JSON"
+elif [[ -f "$ARTIFACT_CONFIG_JSON" ]]; then
+  CONFIG_JSON="$ARTIFACT_CONFIG_JSON"
+else
+  CONFIG_JSON="$DEFAULT_CONFIG_JSON"
+fi
 OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_RUN_ROOT/$RUN_ID}"
 RESULTS_TSV_PATH="${RESULTS_TSV_PATH:-$DEFAULT_RUN_ROOT/results.tsv}"
 VAL_PATTERN="${VAL_PATTERN:-$ROOT_DIR/data/datasets/fineweb10B_sp1024/fineweb_val_*.bin}"

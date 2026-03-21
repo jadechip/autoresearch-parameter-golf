@@ -247,6 +247,19 @@ RUN_ID=h100_8x_trial bash scripts/run_h100_8x_train.sh
 
 This uses `torchrun --standalone --nproc_per_node=8` under the hood.
 
+By default, the `8xH100` launcher now runs in submission-style train mode:
+
+- no periodic validation
+- no eval-on-step-0
+- no LAWA eval inside the timed train phase
+- export the artifact, then score it in a separate eval run
+
+If you want the older full-rehearsal behavior with train-time validation, set:
+
+```bash
+SUBMISSION_TRAIN_ONLY=0 RUN_ID=h100_8x_trial bash scripts/run_h100_8x_train.sh
+```
+
 ### 3. Re-Evaluate The Exported Artifact Under The Eval Path
 
 Use a separate eval run so you have an exact artifact-reload result and wall-clock number for evaluation:
@@ -256,6 +269,8 @@ ARTIFACT_PATH=./runs/runpod_h100_8x_10min/h100_8x_trial/submission_bundle \
 RUN_ID=h100_8x_eval \
 bash scripts/run_h100_8x_eval.sh
 ```
+
+The eval launcher will automatically use the `config.json` saved beside the training run artifact when available, so eval uses the exact exported model config instead of only the base H100 config.
 
 ### 4. Package A Candidate Records Folder
 
