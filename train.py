@@ -104,7 +104,6 @@ class ModelConfig:
     qk_gain_init: float = 1.0
     q_low_rank: int = 0
     final_tail_q_low_rank: int | None = None
-    full_rank_tail_q_blocks: int = 0
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     fake_quant_start_step: int = 50
@@ -1046,7 +1045,7 @@ def delay_mlp_fake_quant_until_full_context_on_small_batch_selective_qat_line(cf
     model_cfg.fake_quant_start_step = cfg.train_seq_len_warmup_steps
 
 
-def restore_full_rank_q_on_last_two_tail_blocks_of_late_qat_small_batch_line(cfg: TrainConfig) -> None:
+def restore_full_rank_q_on_final_tail_of_late_qat_small_batch_line(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
         return
@@ -1056,7 +1055,7 @@ def restore_full_rank_q_on_last_two_tail_blocks_of_late_qat_small_batch_line(cfg
         return
     if model_cfg.q_low_rank != model_cfg.d_model // 4:
         return
-    if model_cfg.final_tail_q_low_rank is not None or model_cfg.full_rank_tail_q_blocks != 0:
+    if model_cfg.final_tail_q_low_rank is not None:
         return
     if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
         return
@@ -1082,7 +1081,7 @@ def restore_full_rank_q_on_last_two_tail_blocks_of_late_qat_small_batch_line(cfg
         return
     if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
         return
-    model_cfg.full_rank_tail_q_blocks = 2
+    model_cfg.final_tail_q_low_rank = 0
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -2103,7 +2102,6 @@ class RecurrentGPT(nn.Module):
         super().__init__()
         self.cfg = cfg
         final_tail_q_low_rank = cfg.q_low_rank if cfg.final_tail_q_low_rank is None else cfg.final_tail_q_low_rank
-        full_rank_tail_q_blocks = min(cfg.full_rank_tail_q_blocks, cfg.tail_layers)
         non_recurrent_hidden_bonus = (
             cfg.non_recurrent_mlp_hidden_bonus
             if cfg.non_recurrent_mlp_hidden_bonus is not None
@@ -2130,11 +2128,7 @@ class RecurrentGPT(nn.Module):
                     cfg,
                     num_adapter_slots=0,
                     mlp_hidden_bonus=non_recurrent_hidden_bonus,
-                    q_low_rank=(
-                        0
-                        if full_rank_tail_q_blocks > 0 and tail_idx >= cfg.tail_layers - full_rank_tail_q_blocks
-                        else final_tail_q_low_rank if tail_idx == cfg.tail_layers - 1 else None
-                    ),
+                    q_low_rank=final_tail_q_low_rank if tail_idx == cfg.tail_layers - 1 else None,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -2983,10 +2977,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
-    if cfg.model.full_rank_tail_q_blocks < 0:
-        raise ConfigError("full_rank_tail_q_blocks must be >= 0")
-    if cfg.model.full_rank_tail_q_blocks > cfg.model.tail_layers:
-        raise ConfigError("full_rank_tail_q_blocks must be <= tail_layers")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
@@ -3721,7 +3711,6 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--num_heads", type=int, default=None)
     parser.add_argument("--num_kv_heads", type=int, default=None)
     parser.add_argument("--q_low_rank", type=int, default=None)
-    parser.add_argument("--full_rank_tail_q_blocks", type=int, default=None)
     parser.add_argument("--stem_layers", type=int, default=None)
     parser.add_argument("--shared_layers", type=int, default=None)
     parser.add_argument("--recurrence_loops", type=int, default=None)
@@ -3799,7 +3788,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         "num_heads",
         "num_kv_heads",
         "q_low_rank",
-        "full_rank_tail_q_blocks",
         "stem_layers",
         "shared_layers",
         "recurrence_loops",
@@ -3880,7 +3868,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     shrink_global_batch_on_selective_qat_low_rank_q_compact_line(cfg)
     shrink_global_batch_further_on_selective_qat_low_rank_q_compact_line(cfg)
     delay_mlp_fake_quant_until_full_context_on_small_batch_selective_qat_line(cfg)
-    restore_full_rank_q_on_last_two_tail_blocks_of_late_qat_small_batch_line(cfg)
+    restore_full_rank_q_on_final_tail_of_late_qat_small_batch_line(cfg)
     return cfg
 
 
