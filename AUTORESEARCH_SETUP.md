@@ -97,6 +97,12 @@ The loop writes additional local state under:
 - `./.autoresearch/errors.log`
 - `./.autoresearch/runs/`
 
+For a read-only live tail of the supervisor plus the newest iteration log:
+
+```bash
+bash scripts/watch_codex_autoresearch.sh
+```
+
 7. Read results from:
 
 - `./runs/autoresearch_5090/index/latest.json`
@@ -158,3 +164,28 @@ Compare completed runs:
 ```bash
 uv run pgolf-compare-runs --results_tsv ./runs/autoresearch_5090/results.tsv
 ```
+
+## H100 Rehearsal Path
+
+Once a candidate survives the cheap search loop, use the dedicated H100 launchers:
+
+```bash
+RUN_ID=h100_1x_trial bash scripts/run_h100_1x_train.sh
+RUN_ID=h100_8x_trial bash scripts/run_h100_8x_train.sh
+ARTIFACT_PATH=./runs/runpod_h100_8x_10min/h100_8x_trial/submission_bundle RUN_ID=h100_8x_eval bash scripts/run_h100_8x_eval.sh
+```
+
+Then package a records-folder candidate:
+
+```bash
+uv run pgolf-package-submission \
+  --train_results_json ./runs/runpod_h100_8x_10min/h100_8x_trial/results.json \
+  --eval_results_json ./runs/runpod_h100_8x_eval/h100_8x_eval/results.json \
+  --track track_10min_16mb \
+  --name "My Candidate" \
+  --author "Your Name" \
+  --github_id your-github-id \
+  --blurb "Short summary of the method."
+```
+
+This emits `./submission_candidates/...` with `README.md`, `submission.json`, `train_gpt.py`, and copied logs/results/manifests.
