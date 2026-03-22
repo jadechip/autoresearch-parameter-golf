@@ -3,14 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-
-run_python() {
-  if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
-    "$ROOT_DIR/.venv/bin/python" "$@"
-  else
-    uv run python "$@"
-  fi
-}
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 
 STATE_DIR="${STATE_DIR:-$ROOT_DIR/.autoresearch}"
 BASELINE_RESULTS="${BASELINE_RESULTS:-$ROOT_DIR/runs/autoresearch_5090/index/latest.json}"
@@ -23,7 +16,13 @@ echo "Initializing autoresearch session"
 echo "STATE_DIR=$STATE_DIR"
 echo "BASELINE_RESULTS=$BASELINE_RESULTS"
 
-run_python "$ROOT_DIR/scripts/autoresearch_state.py" \
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Missing virtualenv python: $PYTHON_BIN" >&2
+  echo "Run: bash scripts/bootstrap.sh" >&2
+  exit 2
+fi
+
+"$PYTHON_BIN" "$ROOT_DIR/scripts/autoresearch_state.py" \
   --state_dir "$STATE_DIR" \
   init \
   --baseline_results "$BASELINE_RESULTS" \

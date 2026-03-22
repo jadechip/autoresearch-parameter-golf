@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+TORCHRUN_BIN="$ROOT_DIR/.venv/bin/torchrun"
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 if [[ "$NPROC_PER_NODE" == "8" ]]; then
@@ -62,8 +63,14 @@ export PYTHONUNBUFFERED=1
 
 uv sync --frozen --extra dev --extra tokenizer
 
+if [[ ! -x "$TORCHRUN_BIN" ]]; then
+  echo "Missing virtualenv torchrun: $TORCHRUN_BIN" >&2
+  echo "Run: bash scripts/bootstrap.sh" >&2
+  exit 2
+fi
+
 set +e
-uv run torchrun --standalone --nproc_per_node="$NPROC_PER_NODE" train.py \
+"$TORCHRUN_BIN" --standalone --nproc_per_node="$NPROC_PER_NODE" train.py \
   --config_json "$CONFIG_JSON" \
   --train_pattern "$TRAIN_PATTERN" \
   --val_pattern "$VAL_PATTERN" \

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 
 CONFIG_JSON="${CONFIG_JSON:-$ROOT_DIR/configs/runpod_5090_single_gpu.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/runs/runpod_5090_single_gpu}"
@@ -44,7 +45,13 @@ export PYTHONUNBUFFERED=1
 
 uv sync --frozen --extra dev --extra tokenizer
 
-if ! uv run python train.py \
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Missing virtualenv python: $PYTHON_BIN" >&2
+  echo "Run: bash scripts/bootstrap.sh" >&2
+  exit 2
+fi
+
+if ! "$PYTHON_BIN" train.py \
   --config_json "$CONFIG_JSON" \
   --train_pattern "$TRAIN_PATTERN" \
   --val_pattern "$VAL_PATTERN" \

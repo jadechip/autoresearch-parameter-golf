@@ -1596,6 +1596,14 @@ def barrier_if_needed() -> None:
         dist.barrier()
 
 
+def should_stop_on_wallclock(local_should_stop: bool, device: torch.device) -> bool:
+    if not (dist.is_available() and dist.is_initialized()):
+        return local_should_stop
+    stop_tensor = torch.tensor([1 if local_should_stop else 0], device=device, dtype=torch.int32)
+    dist.all_reduce(stop_tensor, op=dist.ReduceOp.MAX)
+    return bool(int(stop_tensor.item()))
+
+
 @contextlib.contextmanager
 def maybe_autocast(device: torch.device, enabled: bool = True) -> Iterator[None]:
     if enabled and device.type == "cuda":
@@ -3253,7 +3261,7 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
         schedule_total_steps = target_iterations
         for step in range(start_step, target_iterations):
             session_elapsed = time.time() - training_start
-            if session_elapsed >= cfg.max_wallclock_seconds:
+            if should_stop_on_wallclock(session_elapsed >= cfg.max_wallclock_seconds, device):
                 if rank0:
                     print(f"[train] stopping early at step {step} due to max_wallclock_seconds={cfg.max_wallclock_seconds}")
                 break

@@ -18,10 +18,10 @@ install-cpu:
 	bash scripts/bootstrap.sh --no-tokenizer
 
 smoke-data:
-	uv run pgolf-prepare smoke-data --output_dir ./smoke_data
+	.venv/bin/python prepare.py smoke-data --output_dir ./smoke_data
 
 smoke-train:
-	uv run pgolf-train --config_json ./smoke_data/smoke_config.json --max_wallclock_seconds 30
+	.venv/bin/python train.py --config_json ./smoke_data/smoke_config.json --max_wallclock_seconds 30
 
 smoke: smoke-data smoke-train
 
@@ -65,7 +65,7 @@ tensorboard-autoresearch:
 	bash scripts/run_tensorboard_autoresearch.sh
 
 compare-autoresearch:
-	uv run pgolf-compare-runs --results_tsv $(RESULTS_TSV)
+	.venv/bin/python compare_runs.py --results_tsv $(RESULTS_TSV)
 
 package-submission:
-	uv run pgolf-package-submission --train_results_json $(RESULTS_JSON) --track $(PACKAGE_TRACK) --name "$(PACKAGE_NAME)" --author "$(PACKAGE_AUTHOR)" --github_id "$(PACKAGE_GITHUB_ID)" --blurb "$(PACKAGE_BLURB)"
+	.venv/bin/python package_submission_candidate.py --train_results_json $(RESULTS_JSON) --track $(PACKAGE_TRACK) --name "$(PACKAGE_NAME)" --author "$(PACKAGE_AUTHOR)" --github_id "$(PACKAGE_GITHUB_ID)" --blurb "$(PACKAGE_BLURB)"

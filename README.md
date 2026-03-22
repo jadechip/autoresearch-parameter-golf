@@ -75,7 +75,7 @@ bash scripts/run_tensorboard_autoresearch.sh
 Or compare completed runs:
 
 ```bash
-uv run pgolf-compare-runs --results_tsv ./runs/autoresearch_5090/results.tsv
+.venv/bin/python compare_runs.py --results_tsv ./runs/autoresearch_5090/results.tsv
 ```
 
 For a remote host, expose or forward port `6006`, then open TensorBoard in your local browser. A typical SSH tunnel looks like:
@@ -102,6 +102,8 @@ For long-running autonomous search, prefer the supervisor loop:
 ```bash
 bash scripts/run_codex_autoresearch_loop.sh
 ```
+
+The loop prepends `./.venv/bin` to `PATH` before launching `codex exec`, so repo-local `python` and `torchrun` resolve to the bootstrapped environment instead of the host Python.
 
 This is the closest match to Ralph's execution model:
 
@@ -275,7 +277,7 @@ The eval launcher will automatically use the `config.json` saved beside the trai
 ### 4. Package A Candidate Records Folder
 
 ```bash
-uv run pgolf-package-submission \
+.venv/bin/python package_submission_candidate.py \
   --train_results_json ./runs/runpod_h100_8x_10min/h100_8x_trial/results.json \
   --eval_results_json ./runs/runpod_h100_8x_eval/h100_8x_eval/results.json \
   --track track_10min_16mb \
