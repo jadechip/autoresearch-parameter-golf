@@ -39,7 +39,7 @@
     "final_tail_smear_gate": false,
     "logit_softcap": 30.0,
     "mlp_mult": 2,
-    "non_recurrent_mlp_hidden_bonus": 2432,
+    "non_recurrent_mlp_hidden_bonus": 3584,
     "num_heads": 8,
     "num_kv_heads": 4,
     "q_low_rank": 128,
@@ -53,7 +53,7 @@
     "shared_mlp_hidden_bonus": 0,
     "shared_q_low_rank": null,
     "stem_layers": 0,
-    "tail_layers": 4,
+    "tail_layers": 3,
     "tie_embeddings": true,
     "vocab_size": 1024
   },
@@ -84,8 +84,8 @@
       "adapter",
       "lm_head",
       "tok_emb.weight",
-      "tail.3.mlp.",
-      "tail.3.attn.q_proj.weight"
+      "tail.2.mlp.",
+      "tail.2.attn.q_proj.weight"
     ],
     "keep_float_store_dtype": "torch.float16",
     "low_bit_bits": 6,
