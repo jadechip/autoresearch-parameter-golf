@@ -12,6 +12,7 @@ from train import append_jsonl, atomic_write_json, load_and_validate_results
 
 SESSION_SCHEMA_VERSION = "pgolf.autoresearch_session.v1"
 EXPERIMENT_LOG_SCHEMA_VERSION = "pgolf.autoresearch_experiment.v1"
+TRACKED_ACCEPTED_STATE_SCHEMA_VERSION = "pgolf.autoresearch_git_state.v1"
 SEARCH_MIN_MEANINGFUL_BPB_GAIN = 0.001
 SEARCH_ARTIFACT_TARGET_BYTES_MIN = 12_000_000
 SEARCH_ARTIFACT_TARGET_BYTES_MAX = 15_500_000
@@ -80,6 +81,28 @@ def runs_dir_path(state_dir: Path) -> Path:
     return state_dir / "runs"
 
 
+def tracked_autoresearch_dir() -> Path:
+    return repo_root() / "state" / "autoresearch"
+
+
+def promoted_configs_dir() -> Path:
+    return repo_root() / "configs" / "promoted"
+
+
+def tracked_accepted_state_path() -> Path:
+    return tracked_autoresearch_dir() / "accepted_state.json"
+
+
+def tracked_promoted_5090_config_path() -> Path:
+    return promoted_configs_dir() / "autoresearch_5090_best.json"
+
+
+def tracked_promoted_h100_config_path(mode: str) -> Path:
+    if mode not in {"1x", "8x"}:
+        raise ValueError(f"unsupported promoted h100 mode: {mode}")
+    return promoted_configs_dir() / f"autoresearch_h100_{mode}_best.json"
+
+
 def git_output(args: list[str], cwd: Path | None = None) -> str:
     proc = subprocess.run(
         args,
@@ -103,8 +126,12 @@ def current_commit_short() -> str:
     return git_output(["git", "rev-parse", "--short", "HEAD"])
 
 
+def load_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def resolve_results_source(path: Path) -> Path:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = load_json(path)
     indexed_source = payload.get("indexed_source_results_path")
     if indexed_source:
         return Path(str(indexed_source))
@@ -138,6 +165,141 @@ def append_experiment_event(state_dir: Path, payload: dict[str, Any]) -> Path:
     return append_jsonl(experiments_path(state_dir), event)
 
 
+def repo_relative_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.relative_to(repo_root()))
+    except ValueError:
+        return str(path)
+
+
+def default_search_policy() -> dict[str, Any]:
+    return {
+        "min_meaningful_bpb_gain": SEARCH_MIN_MEANINGFUL_BPB_GAIN,
+        "artifact_target_bytes_min": SEARCH_ARTIFACT_TARGET_BYTES_MIN,
+        "artifact_target_bytes_max": SEARCH_ARTIFACT_TARGET_BYTES_MAX,
+        "max_consecutive_losing_micro_experiments": SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS,
+        "structural_axes": list(SEARCH_STRUCTURAL_AXES),
+        "external_priors": list(SEARCH_EXTERNAL_PRIORS),
+        "next_priority_axes": list(SEARCH_NEXT_PRIORITY_AXES),
+        "do_not_overweight": list(SEARCH_DO_NOT_OVERWEIGHT),
+    }
+
+
+def portable_5090_defaults() -> dict[str, Any]:
+    return {
+        "train_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin",
+        "val_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin",
+        "tokenizer_path": "./data/tokenizers/fineweb_1024_bpe.model",
+        "output_dir": "./runs/autoresearch_5090/promoted_current",
+        "run_name": None,
+        "results_tsv_path": "./runs/autoresearch_5090/results.tsv",
+        "metrics_jsonl_path": None,
+        "tensorboard_log_dir": None,
+        "resume_from": None,
+        "load_artifact_path": None,
+        "max_wallclock_seconds": 300.0,
+    }
+
+
+def portable_h100_defaults(mode: str) -> dict[str, Any]:
+    if mode == "8x":
+        return {
+            "train_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin",
+            "val_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin",
+            "tokenizer_path": "./data/tokenizers/fineweb_1024_bpe.model",
+            "output_dir": "./runs/runpod_h100_8x_10min/promoted",
+            "run_name": None,
+            "results_tsv_path": "./runs/runpod_h100_8x_10min/results.tsv",
+            "metrics_jsonl_path": None,
+            "tensorboard_log_dir": None,
+            "resume_from": None,
+            "load_artifact_path": None,
+            "max_wallclock_seconds": 600.0,
+            "log_every": 20,
+            "val_every": 100,
+            "checkpoint_every": 100,
+            "use_lawa": True,
+            "verify_export_reload": True,
+        }
+    if mode == "1x":
+        return {
+            "train_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin",
+            "val_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin",
+            "tokenizer_path": "./data/tokenizers/fineweb_1024_bpe.model",
+            "output_dir": "./runs/runpod_h100_1x_10min/promoted",
+            "run_name": None,
+            "results_tsv_path": "./runs/runpod_h100_1x_10min/results.tsv",
+            "metrics_jsonl_path": None,
+            "tensorboard_log_dir": None,
+            "resume_from": None,
+            "load_artifact_path": None,
+            "max_wallclock_seconds": 600.0,
+            "log_every": 20,
+            "val_every": 100,
+            "checkpoint_every": 100,
+            "use_lawa": True,
+            "verify_export_reload": True,
+        }
+    raise ValueError(f"unsupported promoted h100 mode: {mode}")
+
+
+def portable_promoted_config(source_config: dict[str, Any], target: str) -> dict[str, Any]:
+    payload = json.loads(json.dumps(source_config))
+    defaults = portable_5090_defaults() if target == "5090" else portable_h100_defaults(target)
+    for key, value in defaults.items():
+        payload[key] = value
+    return payload
+
+
+def load_tracked_accepted_state(path: Path) -> dict[str, Any]:
+    payload = load_json(path)
+    if payload.get("schema_version") != TRACKED_ACCEPTED_STATE_SCHEMA_VERSION:
+        raise ValueError(f"unexpected tracked accepted state schema: {payload.get('schema_version')}")
+    return payload
+
+
+def sync_tracked_accepted_state(
+    session: Mapping[str, Any],
+    *,
+    resolved_results: Path | None = None,
+    results: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    accepted_payload: dict[str, Any] = {
+        "schema_version": TRACKED_ACCEPTED_STATE_SCHEMA_VERSION,
+        "updated_at_unix": time.time(),
+        "current_branch": current_branch(),
+        "current_commit": current_commit(),
+        "current_commit_short": current_commit_short(),
+        "accepted_commit": session.get("accepted_commit"),
+        "accepted_commit_short": session.get("accepted_commit_short"),
+        "accepted_run_id": session.get("accepted_run_id"),
+        "accepted_val_bpb": session.get("accepted_val_bpb"),
+        "accepted_artifact_bytes": session.get("accepted_artifact_bytes"),
+        "accepted_results_path": None if resolved_results is None else str(resolved_results),
+        "search_policy": dict(session.get("search_policy") or default_search_policy()),
+    }
+
+    if results is not None and results.get("config_path"):
+        source_config_path = Path(str(results["config_path"]))
+        if source_config_path.is_file():
+            source_config = load_json(source_config_path)
+            promoted_5090_path = tracked_promoted_5090_config_path()
+            promoted_h100_8x_path = tracked_promoted_h100_config_path("8x")
+            promoted_h100_1x_path = tracked_promoted_h100_config_path("1x")
+            atomic_write_json(promoted_5090_path, portable_promoted_config(source_config, "5090"))
+            atomic_write_json(promoted_h100_8x_path, portable_promoted_config(source_config, "8x"))
+            atomic_write_json(promoted_h100_1x_path, portable_promoted_config(source_config, "1x"))
+            accepted_payload["source_config_path"] = str(source_config_path)
+            accepted_payload["promoted_5090_config_path"] = repo_relative_path(promoted_5090_path)
+            accepted_payload["promoted_h100_8x_config_path"] = repo_relative_path(promoted_h100_8x_path)
+            accepted_payload["promoted_h100_1x_config_path"] = repo_relative_path(promoted_h100_1x_path)
+
+    atomic_write_json(tracked_accepted_state_path(), accepted_payload)
+    return accepted_payload
+
+
 def ensure_notes_file(state_dir: Path) -> None:
     path = notes_path(state_dir)
     if path.exists():
@@ -145,7 +307,8 @@ def ensure_notes_file(state_dir: Path) -> None:
     path.write_text(
         "# Autoresearch Notes\n\n"
         "Accepted state:\n"
-        "- The accepted code state is the current branch tip plus `session.json`.\n"
+        "- The accepted code state is the current branch tip plus `state/autoresearch/accepted_state.json`.\n"
+        "- The promoted cross-host configs live under `configs/promoted/`.\n"
         "- Numeric `best.json` is telemetry only; it may point at a reverted run.\n\n"
         "Current campaign:\n"
         f"- Soft artifact target band for 5090 search: {SEARCH_ARTIFACT_TARGET_BYTES_MIN:,} to {SEARCH_ARTIFACT_TARGET_BYTES_MAX:,} bytes.\n"
@@ -224,16 +387,13 @@ def init_session(state_dir: Path, baseline_results_path: Path, force: bool = Fal
             "min_meaningful_bpb_gain": SEARCH_MIN_MEANINGFUL_BPB_GAIN,
             "artifact_target_bytes_min": SEARCH_ARTIFACT_TARGET_BYTES_MIN,
             "artifact_target_bytes_max": SEARCH_ARTIFACT_TARGET_BYTES_MAX,
-            "max_consecutive_losing_micro_experiments": SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS,
-            "structural_axes": list(SEARCH_STRUCTURAL_AXES),
-            "external_priors": list(SEARCH_EXTERNAL_PRIORS),
-            "next_priority_axes": list(SEARCH_NEXT_PRIORITY_AXES),
-            "do_not_overweight": list(SEARCH_DO_NOT_OVERWEIGHT),
+            **default_search_policy(),
         },
     }
     write_session(state_dir, session)
     ensure_notes_file(state_dir)
     ensure_loop_support_files(state_dir)
+    sync_tracked_accepted_state(session, resolved_results=resolved_results, results=baseline)
     append_experiment_event(
         state_dir,
         {
@@ -248,6 +408,68 @@ def init_session(state_dir: Path, baseline_results_path: Path, force: bool = Fal
             "artifact_bytes": baseline["artifact_bytes"],
             "training_seconds": baseline["training_seconds"],
             "decision": "accepted",
+        },
+    )
+    return load_session(state_dir)
+
+
+def init_session_from_tracked(state_dir: Path, tracked_state_path_value: Path, force: bool = False) -> dict[str, Any]:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = session_path(state_dir)
+    if path.exists() and not force:
+        raise ValueError(f"autoresearch session already exists: {path}")
+
+    tracked = load_tracked_accepted_state(tracked_state_path_value)
+    branch = current_branch()
+    commit = current_commit()
+    commit_short = current_commit_short()
+    now = time.time()
+    accepted_results_path = tracked.get("accepted_results_path") or str(tracked_state_path_value)
+    session = {
+        "schema_version": SESSION_SCHEMA_VERSION,
+        "status": "ready",
+        "created_at_unix": now,
+        "updated_at_unix": now,
+        "repo_root": str(repo_root()),
+        "state_dir": str(state_dir),
+        "current_branch": branch,
+        "accepted_commit": tracked.get("accepted_commit") or commit,
+        "accepted_commit_short": tracked.get("accepted_commit_short") or commit_short,
+        "accepted_run_id": tracked["accepted_run_id"],
+        "accepted_val_bpb": tracked["accepted_val_bpb"],
+        "accepted_artifact_bytes": tracked["accepted_artifact_bytes"],
+        "accepted_results_path": accepted_results_path,
+        "baseline_run_id": tracked["accepted_run_id"],
+        "baseline_val_bpb": tracked["accepted_val_bpb"],
+        "baseline_artifact_bytes": tracked["accepted_artifact_bytes"],
+        "baseline_results_path": accepted_results_path,
+        "latest_run_id": tracked["accepted_run_id"],
+        "latest_results_path": accepted_results_path,
+        "latest_status": "success",
+        "latest_val_bpb": tracked["accepted_val_bpb"],
+        "latest_artifact_bytes": tracked["accepted_artifact_bytes"],
+        "latest_decision": "accepted",
+        "current_experiment": None,
+        "search_policy": tracked.get("search_policy") or default_search_policy(),
+        "tracked_accepted_state_path": str(tracked_state_path_value),
+    }
+    write_session(state_dir, session)
+    ensure_notes_file(state_dir)
+    ensure_loop_support_files(state_dir)
+    append_experiment_event(
+        state_dir,
+        {
+            "event": "tracked_init",
+            "run_id": tracked["accepted_run_id"],
+            "results_path": accepted_results_path,
+            "branch": branch,
+            "commit": commit,
+            "commit_short": commit_short,
+            "status": "success",
+            "val_bpb": tracked["accepted_val_bpb"],
+            "artifact_bytes": tracked["accepted_artifact_bytes"],
+            "decision": "accepted",
+            "tracked_state_path": str(tracked_state_path_value),
         },
     )
     return load_session(state_dir)
@@ -391,7 +613,26 @@ def decide_run(state_dir: Path, run_id: str, decision: str, results_json: Path |
             session["accepted_artifact_bytes"] = results["artifact_bytes"]
             session["accepted_results_path"] = str(resolved_results)
     write_session(state_dir, session)
+    if decision == "accepted":
+        sync_tracked_accepted_state(session, resolved_results=resolved_results, results=results)
     return load_session(state_dir)
+
+
+def sync_current_tracked_accepted_state(state_dir: Path, results_json: Path | None = None) -> dict[str, Any]:
+    session = load_session(state_dir)
+    resolved_results: Path | None = None
+    results: dict[str, Any] | None = None
+    if results_json is not None:
+        resolved_results = resolve_results_source(results_json)
+    else:
+        accepted_results_path = session.get("accepted_results_path")
+        if accepted_results_path:
+            candidate = Path(str(accepted_results_path))
+            if candidate.is_file():
+                resolved_results = resolve_results_source(candidate)
+    if resolved_results is not None and resolved_results.is_file():
+        results = dict(load_and_validate_results(resolved_results))
+    return sync_tracked_accepted_state(session, resolved_results=resolved_results, results=results)
 
 
 def print_payload(payload: dict[str, Any]) -> None:
@@ -406,6 +647,10 @@ def main() -> None:
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--baseline_results", type=str, required=True)
     init_parser.add_argument("--force", action="store_true")
+
+    tracked_init_parser = subparsers.add_parser("init-from-tracked")
+    tracked_init_parser.add_argument("--tracked_state", type=str, required=True)
+    tracked_init_parser.add_argument("--force", action="store_true")
 
     subparsers.add_parser("require-ready")
     subparsers.add_parser("show")
@@ -430,11 +675,17 @@ def main() -> None:
     decide_parser.add_argument("--decision", type=str, choices=("accepted", "reverted"), required=True)
     decide_parser.add_argument("--results_json", type=str, default=None)
 
+    sync_parser = subparsers.add_parser("sync-tracked-accepted")
+    sync_parser.add_argument("--results_json", type=str, default=None)
+
     args = parser.parse_args()
     state_dir = Path(args.state_dir)
 
     if args.command == "init":
         print_payload(init_session(state_dir, Path(args.baseline_results), force=args.force))
+        return
+    if args.command == "init-from-tracked":
+        print_payload(init_session_from_tracked(state_dir, Path(args.tracked_state), force=args.force))
         return
     if args.command == "require-ready":
         print_payload(require_ready(state_dir))
@@ -463,6 +714,9 @@ def main() -> None:
         return
     if args.command == "decide":
         print_payload(decide_run(state_dir, args.run_id, args.decision, None if args.results_json is None else Path(args.results_json)))
+        return
+    if args.command == "sync-tracked-accepted":
+        print_payload(sync_current_tracked_accepted_state(state_dir, None if args.results_json is None else Path(args.results_json)))
         return
     raise AssertionError(f"unhandled command: {args.command}")
 

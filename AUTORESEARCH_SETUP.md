@@ -49,6 +49,10 @@ This creates:
 - `./.autoresearch/session.json`
 - `./.autoresearch/experiments.jsonl`
 - `./.autoresearch/notes.md`
+- `./state/autoresearch/accepted_state.json`
+- `./configs/promoted/autoresearch_5090_best.json`
+- `./configs/promoted/autoresearch_h100_8x_best.json`
+- `./configs/promoted/autoresearch_h100_1x_best.json`
 
 The session file now carries a production-aligned search policy, including:
 
@@ -57,6 +61,14 @@ The session file now carries a production-aligned search policy, including:
 - a limit of `3` consecutive losing micro-tuning runs before the next run should be structural / byte-allocation oriented
 
 Once initialized, non-baseline autoresearch runs will refuse to start unless `session.json` is in `ready` state.
+
+On a fresh 5090 host with no old `runs/` tree, the same init script will fall back to `./state/autoresearch/accepted_state.json` and recreate `./.autoresearch/session.json` from the git-tracked accepted winner.
+
+If you need to refresh those tracked files from the current local accepted winner before pushing, run:
+
+```bash
+.venv/bin/python scripts/autoresearch_state.py --state_dir ./.autoresearch sync-tracked-accepted
+```
 
 5. Optional live monitor in a second terminal:
 
@@ -117,6 +129,12 @@ bash scripts/watch_codex_autoresearch.sh
 
 6. Promote only clear 5090 winners to H100 and then 8xH100 rehearsal runs.
 
+The default git-tracked promotion files are:
+
+- `./configs/promoted/autoresearch_5090_best.json`
+- `./configs/promoted/autoresearch_h100_8x_best.json`
+- `./configs/promoted/autoresearch_h100_1x_best.json`
+
 ## Agent Guidance
 
 - Prefer editing `train.py` only.
@@ -133,6 +151,7 @@ bash scripts/watch_codex_autoresearch.sh
 - Use `.autoresearch/session.json` as the readiness gate before starting new experiments.
 - Use `.autoresearch/experiments.jsonl` as append-only local experiment telemetry.
 - Use `.autoresearch/notes.md` as the structural hypothesis ledger for open, tried, winning, and rejected ideas.
+- After an accepted winner, commit the refreshed tracked files under `state/autoresearch/` and `configs/promoted/`.
 - In a fresh session, cover structural axes early: `d_model`, `shared_layers` vs `recurrence_loops`, `tail_layers`, `mlp_mult`, `adapter_rank` / `adapter_targets`, and fake-quant timing / clip percentile.
 - If artifact size remains below the search target band, prefer bounded architecture / byte-allocation experiments before long stretches of optimizer micro-tuning.
 - If resuming, point `--resume_from` at `output_dir/checkpoints/final.pt` or `latest.pt`.
@@ -171,8 +190,8 @@ Compare completed runs:
 Once a candidate survives the cheap search loop, use the dedicated H100 launchers:
 
 ```bash
-RUN_ID=h100_1x_trial bash scripts/run_h100_1x_train.sh
-RUN_ID=h100_8x_trial bash scripts/run_h100_8x_train.sh
+CONFIG_JSON=./configs/promoted/autoresearch_h100_1x_best.json RUN_ID=h100_1x_trial bash scripts/run_h100_1x_train.sh
+CONFIG_JSON=./configs/promoted/autoresearch_h100_8x_best.json RUN_ID=h100_8x_trial bash scripts/run_h100_8x_train.sh
 ARTIFACT_PATH=./runs/runpod_h100_8x_10min/h100_8x_trial/submission_bundle RUN_ID=h100_8x_eval bash scripts/run_h100_8x_eval.sh
 ```
 

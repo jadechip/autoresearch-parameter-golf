@@ -105,7 +105,8 @@ Rules:
 - If a run is a meaningful winner, keep the experiment commit as part of the accepted branch history.
 - Include the run id and val_bpb in the post-run keep/revert commit message when possible.
 - After each keep/revert decision, update the Ralph-style state file with:
-  `uv run python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
+  `.venv/bin/python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
+- If a run is accepted, commit the refreshed tracked files under `state/autoresearch/` and `configs/promoted/` so a fresh 5090 or H100 host can recover the winner from git alone.
 - After each keep/revert decision, update `.autoresearch/notes.md` with a short note about what hypothesis was tested and whether it won, lost, or remains unresolved.
 - Use recent git history as memory so you do not repeat the same weak ideas.
 - Keep one experiment per code change.

@@ -91,9 +91,10 @@ Required loop for this invocation:
 6. inspect `latest.json`, `best.json`, and the concrete run outputs
 7. keep the experiment commit if it wins, otherwise add a revert commit
 8. record the decision with:
-   `uv run python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
-9. update `.autoresearch/notes.md` with a short note about the tested hypothesis and outcome
-10. stop after summarizing the one completed iteration
+   `.venv/bin/python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
+9. if the run is accepted, commit the refreshed tracked files under `state/autoresearch/` and `configs/promoted/`
+10. update `.autoresearch/notes.md` with a short note about the tested hypothesis and outcome
+11. stop after summarizing the one completed iteration
 
 Do not start a second experiment in this invocation.
 Do not rely on stdout or run.log as the control surface.

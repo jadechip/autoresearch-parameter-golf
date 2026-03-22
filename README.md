@@ -58,6 +58,13 @@ This creates a lightweight Ralph-style state directory at:
 - `./.autoresearch/experiments.jsonl`
 - `./.autoresearch/notes.md`
 
+Accepted winners also materialize into git-tracked files:
+
+- `./state/autoresearch/accepted_state.json`
+- `./configs/promoted/autoresearch_5090_best.json`
+- `./configs/promoted/autoresearch_h100_8x_best.json`
+- `./configs/promoted/autoresearch_h100_1x_best.json`
+
 Once that file exists, non-baseline autoresearch runs are gated on `session.json` being in `ready` state. This prevents Codex from starting prematurely against an uninitialized repo.
 
 The session file also carries the current search policy for Codex, including:
@@ -65,6 +72,14 @@ The session file also carries the current search policy for Codex, including:
 - a soft 5090 artifact target band of `12,000,000` to `15,500,000` bytes
 - a `~0.001 val_bpb` meaningful-win threshold
 - a limit of `3` consecutive losing micro-tunes before the next run should be structural
+
+On a fresh 5090 host with no previous `runs/` tree, `bash scripts/init_autoresearch_session.sh` will fall back to `./state/autoresearch/accepted_state.json` if it exists.
+
+If you need to refresh those tracked files from the current local accepted winner before pushing, run:
+
+```bash
+.venv/bin/python scripts/autoresearch_state.py --state_dir ./.autoresearch sync-tracked-accepted
+```
 
 ### 5. Watch Progress With TensorBoard In Another Terminal
 
@@ -156,6 +171,7 @@ The expected Codex behavior is:
 - keep meaningful winners
 - revert losers
 - use git history as experiment memory
+- commit the refreshed tracked accepted-state files after each accepted winner
 - cover structural / byte-allocation directions early instead of only micro-tuning optimizer values
 
 ### 4. Exact Human Setup For Codex
@@ -232,7 +248,7 @@ Once you have a strong candidate branch, the next step is to rehearse it against
 ### 1. Train On 1xH100 For 10 Minutes
 
 ```bash
-RUN_ID=h100_1x_trial bash scripts/run_h100_1x_train.sh
+CONFIG_JSON=./configs/promoted/autoresearch_h100_1x_best.json RUN_ID=h100_1x_trial bash scripts/run_h100_1x_train.sh
 ```
 
 This writes:
@@ -244,7 +260,7 @@ This writes:
 ### 2. Train On 8xH100 For 10 Minutes
 
 ```bash
-RUN_ID=h100_8x_trial bash scripts/run_h100_8x_train.sh
+CONFIG_JSON=./configs/promoted/autoresearch_h100_8x_best.json RUN_ID=h100_8x_trial bash scripts/run_h100_8x_train.sh
 ```
 
 This uses `torchrun --standalone --nproc_per_node=8` under the hood.

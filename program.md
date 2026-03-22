@@ -229,7 +229,8 @@ Git discipline:
 - Do not accumulate multiple speculative edits without a run in between.
 - Treat the current branch tip plus recent commits as the authoritative memory of accepted state.
 - After each keep/revert decision, update `.autoresearch/session.json` with:
-  `uv run python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
+  `.venv/bin/python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
+- If a run is accepted, commit the refreshed tracked files under `state/autoresearch/` and `configs/promoted/` so the next 5090 or H100 host can recover the winner from git alone.
 - After each keep/revert decision, update `.autoresearch/notes.md` with a short hypothesis note so the next fresh Codex iteration can see which structural directions are still open.
 
 Among candidates with similar `val_bpb`, prefer:

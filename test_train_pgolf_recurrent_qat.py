@@ -140,6 +140,26 @@ def assert_state_dict_equal(lhs: dict, rhs: dict) -> None:
 
 def write_fake_results(path: Path, *, run_id: str, val_bpb: float, status: str = "success") -> Path:
     run_dir = path.parent
+    cfg = mod.TrainConfig(
+        output_dir=str(run_dir),
+        results_tsv_path=str(run_dir / "results.tsv"),
+        train_pattern="./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin",
+        val_pattern="./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin",
+        tokenizer_path="./data/tokenizers/fineweb_1024_bpe.model",
+        max_wallclock_seconds=300.0,
+    )
+    cfg.model = mod.ModelConfig(
+        vocab_size=1024,
+        seq_len=128,
+        d_model=64,
+        num_heads=4,
+        num_kv_heads=2,
+        stem_layers=0,
+        shared_layers=1,
+        recurrence_loops=1,
+        tail_layers=1,
+        adapter_rank=4,
+    )
     payload = {
         "schema_version": mod.RESULTS_SCHEMA_VERSION,
         "status": status,
@@ -173,6 +193,7 @@ def write_fake_results(path: Path, *, run_id: str, val_bpb: float, status: str =
         "resume_from": None,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config.json").write_text(json.dumps(mod.config_to_dict(cfg), indent=2), encoding="utf-8")
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
@@ -908,8 +929,12 @@ def test_autoresearch_index_script_updates_latest_and_best(tmp_path: Path) -> No
     assert float(best["val_bpb"]) == 1.40
 
 
-def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path) -> None:
+def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     state_dir = tmp_path / ".autoresearch"
+    tracked_dir = tmp_path / "state" / "autoresearch"
+    promoted_dir = tmp_path / "configs" / "promoted"
+    monkeypatch.setattr(autoresearch_state, "tracked_autoresearch_dir", lambda: tracked_dir)
+    monkeypatch.setattr(autoresearch_state, "promoted_configs_dir", lambda: promoted_dir)
     baseline_results = write_fake_results(tmp_path / "baseline" / "results.json", run_id="baseline", val_bpb=1.80)
     session = autoresearch_state.init_session(state_dir, baseline_results)
     assert session["status"] == "ready"
@@ -929,6 +954,11 @@ def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path) -> None
     assert "Structural campaign checklist" in notes_text
     assert "Frontier priors" in notes_text
     assert "- [ ] d_model" in notes_text
+    tracked_state = json.loads((tracked_dir / "accepted_state.json").read_text(encoding="utf-8"))
+    assert tracked_state["accepted_run_id"] == "baseline"
+    assert (promoted_dir / "autoresearch_5090_best.json").is_file()
+    assert (promoted_dir / "autoresearch_h100_8x_best.json").is_file()
+    assert (promoted_dir / "autoresearch_h100_1x_best.json").is_file()
 
     started = autoresearch_state.start_run(
         state_dir,
@@ -953,6 +983,18 @@ def test_autoresearch_state_init_start_finish_and_decide(tmp_path: Path) -> None
     assert decided["accepted_run_id"] == "trial_a"
     assert decided["accepted_val_bpb"] == 1.75
     assert decided["accepted_artifact_bytes"] == 1
+    tracked_state = json.loads((tracked_dir / "accepted_state.json").read_text(encoding="utf-8"))
+    assert tracked_state["accepted_run_id"] == "trial_a"
+    assert tracked_state["promoted_5090_config_path"].endswith("configs/promoted/autoresearch_5090_best.json")
+
+    resumed = autoresearch_state.init_session_from_tracked(
+        tmp_path / ".autoresearch_resumed",
+        tracked_dir / "accepted_state.json",
+    )
+    assert resumed["accepted_run_id"] == "trial_a"
+    assert resumed["accepted_val_bpb"] == 1.75
+    resynced = autoresearch_state.sync_current_tracked_accepted_state(state_dir)
+    assert resynced["accepted_run_id"] == "trial_a"
 
     events = [
         json.loads(line)
