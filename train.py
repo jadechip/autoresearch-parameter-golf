@@ -1228,56 +1228,6 @@ def add_final_tail_smear_gate_on_shared_float_compact_line(cfg: TrainConfig) -> 
     model_cfg.final_tail_smear_gate = True
 
 
-def lower_context_warmup_floor_on_shared_float_smear_gate_line(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if not model_cfg.final_tail_smear_gate:
-        return
-    if not model_cfg.tie_embeddings:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.shared_q_low_rank != 0 or model_cfg.final_tail_q_low_rank != 0:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = ("norm", "scale", "gain", "adapter", "lm_head", "tok_emb.weight", "shared.0.attn.", "shared.0.mlp.")
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    cfg.train_seq_len_min = 512
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -4112,7 +4062,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     keep_tied_embeddings_float_on_final_tail_q_small_batch_line(cfg)
     restore_shared_full_rank_q_and_keep_shared_block_float_on_tied_embed_line(cfg)
     add_final_tail_smear_gate_on_shared_float_compact_line(cfg)
-    lower_context_warmup_floor_on_shared_float_smear_gate_line(cfg)
     return cfg
 
 
