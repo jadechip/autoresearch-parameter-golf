@@ -107,6 +107,8 @@ class ModelConfig:
     final_tail_q_low_rank: int | None = None
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
+    shared_mlp_fake_quant_during_train: bool | None = None
+    final_tail_mlp_fake_quant_during_train: bool | None = None
     fake_quant_start_step: int = 50
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
@@ -2126,14 +2128,23 @@ class GroupedQueryAttention(nn.Module):
 
 
 class ReLU2MLP(nn.Module):
-    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0, hidden_bonus: int = 0):
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        num_adapter_slots: int = 0,
+        hidden_bonus: int = 0,
+        fake_quant_during_train: bool | None = None,
+    ):
         super().__init__()
         hidden = cfg.d_model * cfg.mlp_mult + hidden_bonus
+        mlp_fake_quant_during_train = (
+            cfg.fake_quant_during_train if fake_quant_during_train is None else fake_quant_during_train
+        )
         self.fc = FakeQuantLinear(
             cfg.d_model,
             hidden,
             bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
+            fake_quant_during_train=mlp_fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "mlp_in") else 0,
             adapter_rank=cfg.adapter_rank,
@@ -2143,7 +2154,7 @@ class ReLU2MLP(nn.Module):
             hidden,
             cfg.d_model,
             bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
+            fake_quant_during_train=mlp_fake_quant_during_train,
             fake_quant_start_step=cfg.fake_quant_start_step,
             num_adapter_slots=num_adapter_slots if has_adapter(cfg, "mlp_out") else 0,
             adapter_rank=cfg.adapter_rank,
@@ -2169,12 +2180,18 @@ class TransformerBlock(nn.Module):
         num_adapter_slots: int = 0,
         mlp_hidden_bonus: int = 0,
         q_low_rank: int | None = None,
+        mlp_fake_quant_during_train: bool | None = None,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
         self.mlp_norm = RMSNorm(cfg.d_model)
         self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots, q_low_rank=q_low_rank)
-        self.mlp = ReLU2MLP(cfg, num_adapter_slots=num_adapter_slots, hidden_bonus=mlp_hidden_bonus)
+        self.mlp = ReLU2MLP(
+            cfg,
+            num_adapter_slots=num_adapter_slots,
+            hidden_bonus=mlp_hidden_bonus,
+            fake_quant_during_train=mlp_fake_quant_during_train,
+        )
         scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
@@ -2218,6 +2235,7 @@ class RecurrentGPT(nn.Module):
                     num_adapter_slots=cfg.recurrence_loops,
                     mlp_hidden_bonus=cfg.shared_mlp_hidden_bonus,
                     q_low_rank=cfg.shared_q_low_rank,
+                    mlp_fake_quant_during_train=cfg.shared_mlp_fake_quant_during_train,
                 )
                 for _ in range(cfg.shared_layers)
             ]
@@ -2229,6 +2247,9 @@ class RecurrentGPT(nn.Module):
                     num_adapter_slots=0,
                     mlp_hidden_bonus=non_recurrent_hidden_bonus,
                     q_low_rank=final_tail_q_low_rank if tail_idx == cfg.tail_layers - 1 else None,
+                    mlp_fake_quant_during_train=(
+                        cfg.final_tail_mlp_fake_quant_during_train if tail_idx == cfg.tail_layers - 1 else None
+                    ),
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
