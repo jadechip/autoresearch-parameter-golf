@@ -105,7 +105,6 @@ class ModelConfig:
     q_low_rank: int = 0
     shared_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
-    tail_neighbor_mixer: bool = False
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -1178,59 +1177,6 @@ def restore_shared_full_rank_q_and_keep_shared_block_float_on_tied_embed_line(cf
     )
 
 
-def add_final_tail_neighbor_mixer_on_shared_float_compact_line(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if not model_cfg.tie_embeddings:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4 or model_cfg.shared_q_low_rank != 0:
-        return
-    if model_cfg.final_tail_q_low_rank != 0 or model_cfg.tail_neighbor_mixer:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if not model_cfg.fake_quant_during_train or model_cfg.attn_fake_quant_during_train is not False:
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "shared.0.attn.",
-        "shared.0.mlp.",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    model_cfg.tail_neighbor_mixer = True
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2039,19 +1985,6 @@ class FakeQuantLinear(nn.Module):
         return y
 
 
-class NeighborDeltaMixer(nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.mix_scale = nn.Parameter(torch.full((dim,), 0.05))
-        self.gate_scale = nn.Parameter(torch.zeros(dim))
-        self.gate_bias = nn.Parameter(torch.full((dim,), -2.0))
-
-    def forward(self, x: Tensor) -> Tensor:
-        prev = torch.cat((x.new_zeros(x.size(0), 1, x.size(2)), x[:, :-1]), dim=1)
-        gate = torch.sigmoid(x * self.gate_scale.to(dtype=x.dtype) + self.gate_bias.to(dtype=x.dtype))
-        return (prev - x) * gate * self.mix_scale.to(dtype=x.dtype)
-
-
 class LowRankQProjection(nn.Module):
     def __init__(
         self,
@@ -2248,7 +2181,6 @@ class TransformerBlock(nn.Module):
         mlp_hidden_bonus: int = 0,
         q_low_rank: int | None = None,
         mlp_fake_quant_during_train: bool | None = None,
-        use_neighbor_mixer: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
@@ -2260,7 +2192,6 @@ class TransformerBlock(nn.Module):
             hidden_bonus=mlp_hidden_bonus,
             fake_quant_during_train=mlp_fake_quant_during_train,
         )
-        self.neighbor_mixer = NeighborDeltaMixer(cfg.d_model) if use_neighbor_mixer else None
         scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
@@ -2277,10 +2208,7 @@ class TransformerBlock(nn.Module):
         return scale.to(dtype=x.dtype)
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
-        attn_in = self.attn_norm(x)
-        if self.neighbor_mixer is not None:
-            x = x + self.neighbor_mixer(attn_in)
-        x = x + self.attn(attn_in, slot=slot) * self.residual_scale(self.attn_scale, x, slot)
+        x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         return x
 
@@ -2322,7 +2250,6 @@ class RecurrentGPT(nn.Module):
                     mlp_fake_quant_during_train=(
                         cfg.final_tail_mlp_fake_quant_during_train if tail_idx == cfg.tail_layers - 1 else None
                     ),
-                    use_neighbor_mixer=cfg.tail_neighbor_mixer and tail_idx == cfg.tail_layers - 1,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -4069,7 +3996,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     restore_full_rank_q_on_final_tail_of_late_qat_small_batch_line(cfg)
     keep_tied_embeddings_float_on_final_tail_q_small_batch_line(cfg)
     restore_shared_full_rank_q_and_keep_shared_block_float_on_tied_embed_line(cfg)
-    add_final_tail_neighbor_mixer_on_shared_float_compact_line(cfg)
     return cfg
 
 
