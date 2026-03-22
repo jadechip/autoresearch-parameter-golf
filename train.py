@@ -104,7 +104,6 @@ class ModelConfig:
     qk_gain_init: float = 1.0
     q_low_rank: int = 0
     final_tail_q_low_rank: int | None = None
-    tail_local_kernel: int = 0
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     fake_quant_start_step: int = 50
@@ -1128,49 +1127,6 @@ def keep_tied_embeddings_float_on_final_tail_q_small_batch_line(cfg: TrainConfig
     cfg.quant.keep_float_name_patterns = (*cfg.quant.keep_float_name_patterns, "tok_emb.weight")
 
 
-def add_cheaper_final_tail_local_mixer_on_final_tail_q_small_batch_line(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.final_tail_q_low_rank != 0 or model_cfg.tail_local_kernel != 0:
-        return
-    if not model_cfg.tie_embeddings:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if not model_cfg.fake_quant_during_train or model_cfg.attn_fake_quant_during_train is not False:
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    if "tok_emb.weight" not in cfg.quant.keep_float_name_patterns:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    model_cfg.tail_local_kernel = 2
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -1971,23 +1927,6 @@ class FakeQuantLinear(nn.Module):
         return y
 
 
-class GroupedCausalConv1d(nn.Module):
-    def __init__(self, dim: int, num_groups: int, kernel_size: int):
-        super().__init__()
-        if kernel_size <= 1:
-            raise ValueError("kernel_size must be > 1 for GroupedCausalConv1d")
-        if dim % num_groups != 0:
-            raise ValueError("dim must be divisible by num_groups for GroupedCausalConv1d")
-        self.kernel_size = kernel_size
-        self.conv = nn.Conv1d(dim, dim, kernel_size, groups=num_groups, bias=False)
-        nn.init.normal_(self.conv.weight, mean=0.0, std=0.02)
-
-    def forward(self, x: Tensor) -> Tensor:
-        x_channels = x.transpose(1, 2)
-        x_padded = F.pad(x_channels, (self.kernel_size - 1, 0))
-        return self.conv(x_padded).transpose(1, 2)
-
-
 class LowRankQProjection(nn.Module):
     def __init__(
         self,
@@ -2174,19 +2113,12 @@ class TransformerBlock(nn.Module):
         num_adapter_slots: int = 0,
         mlp_hidden_bonus: int = 0,
         q_low_rank: int | None = None,
-        local_mixer_kernel: int = 0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
         self.mlp_norm = RMSNorm(cfg.d_model)
         self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots, q_low_rank=q_low_rank)
         self.mlp = ReLU2MLP(cfg, num_adapter_slots=num_adapter_slots, hidden_bonus=mlp_hidden_bonus)
-        if local_mixer_kernel > 1:
-            self.local_mixer = GroupedCausalConv1d(cfg.d_model, cfg.num_heads, local_mixer_kernel)
-            self.local_scale = nn.Parameter(torch.full((cfg.d_model,), 0.1))
-        else:
-            self.local_mixer = None
-            self.register_parameter("local_scale", None)
         scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
@@ -2203,10 +2135,7 @@ class TransformerBlock(nn.Module):
         return scale.to(dtype=x.dtype)
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
-        attn_in = self.attn_norm(x)
-        if self.local_mixer is not None:
-            x = x + self.local_mixer(attn_in) * self.local_scale.to(dtype=x.dtype)
-        x = x + self.attn(attn_in, slot=slot) * self.residual_scale(self.attn_scale, x, slot)
+        x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         return x
 
@@ -2243,7 +2172,6 @@ class RecurrentGPT(nn.Module):
                     num_adapter_slots=0,
                     mlp_hidden_bonus=non_recurrent_hidden_bonus,
                     q_low_rank=final_tail_q_low_rank if tail_idx == cfg.tail_layers - 1 else None,
-                    local_mixer_kernel=cfg.tail_local_kernel if tail_idx == cfg.tail_layers - 1 else 0,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -3092,10 +3020,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
-    if cfg.model.tail_local_kernel < 0:
-        raise ConfigError("tail_local_kernel must be >= 0")
-    if cfg.model.tail_local_kernel == 1:
-        raise ConfigError("tail_local_kernel must be 0 or > 1")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
@@ -3989,7 +3913,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     delay_mlp_fake_quant_until_full_context_on_small_batch_selective_qat_line(cfg)
     restore_full_rank_q_on_final_tail_of_late_qat_small_batch_line(cfg)
     keep_tied_embeddings_float_on_final_tail_q_small_batch_line(cfg)
-    add_cheaper_final_tail_local_mixer_on_final_tail_q_small_batch_line(cfg)
     return cfg
 
 
