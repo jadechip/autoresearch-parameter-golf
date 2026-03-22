@@ -1,10 +1,10 @@
 {
-  "accepted_artifact_bytes": 12290316,
-  "accepted_commit": "fd475db1d3888a254dba5e7a23ac12bff2e63809",
-  "accepted_commit_short": "fd475db",
-  "accepted_results_path": "runs/autoresearch_5090/runs/ar5090-20260322-162535/results.json",
-  "accepted_run_id": "ar5090-20260322-162535",
-  "accepted_val_bpb": 1.5562906976348054,
+  "accepted_artifact_bytes": 12044617,
+  "accepted_commit": "2d4fac29b2158ed70e450228adb0cefe3daf2d57",
+  "accepted_commit_short": "2d4fac2",
+  "accepted_results_path": "runs/autoresearch_5090/runs/ar5090-20260322-171146/results.json",
+  "accepted_run_id": "ar5090-20260322-171146",
+  "accepted_val_bpb": 1.5507377390565762,
   "baseline_artifact_bytes": 7174403,
   "baseline_results_path": "/workspace/autoresearch-parameter-golf/runs/autoresearch_5090/runs/baseline_5090_5min_rerun/results.json",
   "baseline_run_id": "baseline_5090_5min_rerun",
@@ -12,12 +12,12 @@
   "created_at_unix": 1774089643.238404,
   "current_branch": "autoresearch/20260322-155816",
   "current_experiment": null,
-  "latest_artifact_bytes": 12326333,
-  "latest_decision": "reverted",
-  "latest_results_path": "/workspace/autoresearch-parameter-golf/runs/autoresearch_5090/runs/ar5090-20260322-165641/results.json",
-  "latest_run_id": "ar5090-20260322-165641",
+  "latest_artifact_bytes": 12044617,
+  "latest_decision": "accepted",
+  "latest_results_path": "/workspace/autoresearch-parameter-golf/runs/autoresearch_5090/runs/ar5090-20260322-171146/results.json",
+  "latest_run_id": "ar5090-20260322-171146",
   "latest_status": "success",
-  "latest_val_bpb": 1.5780621620308075,
+  "latest_val_bpb": 1.5507377390565762,
   "repo_root": "/workspace/autoresearch-parameter-golf",
   "schema_version": "pgolf.autoresearch_session.v1",
   "search_policy": {
@@ -58,5 +58,5 @@
   },
   "state_dir": "/workspace/autoresearch-parameter-golf/.autoresearch",
   "status": "ready",
-  "updated_at_unix": 1774199068.2987707
+  "updated_at_unix": 1774199971.7624898
 }

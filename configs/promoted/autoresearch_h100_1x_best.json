@@ -51,7 +51,7 @@
     "shared_layers": 1,
     "shared_mlp_fake_quant_during_train": null,
     "shared_mlp_hidden_bonus": 512,
-    "shared_q_low_rank": 0,
+    "shared_q_low_rank": null,
     "stem_layers": 0,
     "tail_layers": 3,
     "tie_embeddings": true,
