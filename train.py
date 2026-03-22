@@ -106,7 +106,6 @@ class ModelConfig:
     shared_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
     final_tail_smear_gate: bool = False
-    final_tail_canon_rank: int = 0
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -1337,65 +1336,6 @@ def reallocate_shared_budget_into_near_cap_final_tail_carrier(cfg: TrainConfig) 
     )
 
 
-def add_final_tail_canon_insert_on_near_cap_carrier(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.final_tail_canon_rank != 0:
-        return
-    if model_cfg.final_tail_smear_gate or not model_cfg.tie_embeddings:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4 or model_cfg.shared_q_low_rank is not None:
-        return
-    if model_cfg.final_tail_q_low_rank != 0:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.2.mlp.",
-        "tail.2.attn.q_proj.weight",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    model_cfg.final_tail_canon_rank = model_cfg.d_model // 8
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2392,47 +2332,6 @@ class ReLU2MLP(nn.Module):
         return self.dropout(self.proj(x, slot=slot))
 
 
-def causal_prefix_mean(x: Tensor) -> Tensor:
-    if x.size(1) <= 1:
-        return torch.zeros_like(x)
-    prefix = x.cumsum(dim=1) - x
-    counts = torch.arange(x.size(1), device=x.device, dtype=x.dtype).view(1, -1, 1)
-    safe_counts = counts.clamp_min(1.0)
-    mean = prefix / safe_counts
-    return torch.where(counts > 0, mean, torch.zeros_like(mean))
-
-
-class CanonMixer(nn.Module):
-    def __init__(self, cfg: ModelConfig, rank: int):
-        super().__init__()
-        # Canon uses low-rank previous-token and prefix-mean features to stay cheaper than attention branches.
-        self.down_proj = FakeQuantLinear(
-            cfg.d_model,
-            rank,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-        )
-        self.up_proj = FakeQuantLinear(
-            rank * 2,
-            cfg.d_model,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-            zero_init=True,
-        )
-
-    def set_global_step(self, step: int) -> None:
-        self.down_proj.set_global_step(step)
-        self.up_proj.set_global_step(step)
-
-    def forward(self, x: Tensor) -> Tensor:
-        z = self.down_proj(x)
-        prev = torch.cat((torch.zeros_like(z[:, :1]), z[:, :-1]), dim=1)
-        canon = torch.cat((prev, causal_prefix_mean(z)), dim=-1)
-        return self.up_proj(canon)
-
-
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -2442,12 +2341,10 @@ class TransformerBlock(nn.Module):
         q_low_rank: int | None = None,
         mlp_fake_quant_during_train: bool | None = None,
         smear_gate: bool = False,
-        canon_rank: int = 0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
         self.mlp_norm = RMSNorm(cfg.d_model)
-        self.canon_norm = RMSNorm(cfg.d_model) if canon_rank > 0 else None
         self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots, q_low_rank=q_low_rank)
         self.mlp = ReLU2MLP(
             cfg,
@@ -2455,18 +2352,14 @@ class TransformerBlock(nn.Module):
             hidden_bonus=mlp_hidden_bonus,
             fake_quant_during_train=mlp_fake_quant_during_train,
         )
-        self.canon = CanonMixer(cfg, canon_rank) if canon_rank > 0 else None
         scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
         self.smear_scale = nn.Parameter(torch.zeros(scale_shape)) if smear_gate else None
-        self.canon_scale = nn.Parameter(torch.ones(scale_shape)) if canon_rank > 0 else None
 
     def set_global_step(self, step: int) -> None:
         self.attn.set_global_step(step)
         self.mlp.set_global_step(step)
-        if self.canon is not None:
-            self.canon.set_global_step(step)
 
     def residual_scale(self, scale: nn.Parameter, x: Tensor, slot: int | None) -> Tensor:
         if scale.ndim == 2:
@@ -2476,15 +2369,19 @@ class TransformerBlock(nn.Module):
         return scale.to(dtype=x.dtype)
 
     def causal_smear(self, x: Tensor) -> Tensor:
-        return causal_prefix_mean(x)
+        if x.size(1) <= 1:
+            return torch.zeros_like(x)
+        prefix = x.cumsum(dim=1) - x
+        counts = torch.arange(x.size(1), device=x.device, dtype=x.dtype).view(1, -1, 1)
+        safe_counts = counts.clamp_min(1.0)
+        mean = prefix / safe_counts
+        return torch.where(counts > 0, mean, torch.zeros_like(mean))
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
         x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         if self.smear_scale is not None:
             x = x + self.causal_smear(x) * self.residual_scale(self.smear_scale, x, slot)
-        if self.canon is not None and self.canon_norm is not None and self.canon_scale is not None:
-            x = x + self.canon(self.canon_norm(x)) * self.residual_scale(self.canon_scale, x, slot)
         return x
 
 
@@ -2526,7 +2423,6 @@ class RecurrentGPT(nn.Module):
                         cfg.final_tail_mlp_fake_quant_during_train if tail_idx == cfg.tail_layers - 1 else None
                     ),
                     smear_gate=cfg.final_tail_smear_gate and tail_idx == cfg.tail_layers - 1,
-                    canon_rank=cfg.final_tail_canon_rank if tail_idx == cfg.tail_layers - 1 else 0,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -3379,10 +3275,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
-    if cfg.model.final_tail_canon_rank < 0:
-        raise ConfigError("final_tail_canon_rank must be >= 0")
-    if cfg.model.final_tail_canon_rank >= cfg.model.d_model:
-        raise ConfigError("final_tail_canon_rank must be smaller than d_model")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
@@ -4280,7 +4172,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_final_tail_smear_gate_on_shared_float_compact_line(cfg)
     restore_shared_low_rank_q_on_smear_gate_shared_float_carrier(cfg)
     reallocate_shared_budget_into_near_cap_final_tail_carrier(cfg)
-    add_final_tail_canon_insert_on_near_cap_carrier(cfg)
     return cfg
 
 
