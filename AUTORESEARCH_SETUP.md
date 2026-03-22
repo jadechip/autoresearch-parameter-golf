@@ -142,13 +142,13 @@ bash scripts/watch_codex_autoresearch.sh
 Validate a results file:
 
 ```bash
-uv run pgolf-validate-results ./runs/autoresearch_5090/index/latest.json
+.venv/bin/python validate_results.py ./runs/autoresearch_5090/index/latest.json
 ```
 
 Evaluate a saved artifact:
 
 ```bash
-uv run pgolf-prepare eval-artifact \
+.venv/bin/python prepare.py eval-artifact \
   --config_json ./configs/autoresearch_5090_5min.json \
   --artifact_path ./runs/autoresearch_5090/index/best_run/submission_bundle \
   --output_dir ./runs/autoresearch_5090_eval
@@ -157,13 +157,13 @@ uv run pgolf-prepare eval-artifact \
 Summarize submission bytes:
 
 ```bash
-uv run pgolf-summarize-artifact --results_json ./runs/autoresearch_5090/index/best.json
+.venv/bin/python summarize_artifact.py --results_json ./runs/autoresearch_5090/index/best.json
 ```
 
 Compare completed runs:
 
 ```bash
-uv run pgolf-compare-runs --results_tsv ./runs/autoresearch_5090/results.tsv
+.venv/bin/python compare_runs.py --results_tsv ./runs/autoresearch_5090/results.tsv
 ```
 
 ## H100 Rehearsal Path
@@ -187,7 +187,7 @@ This keeps the timed train run closer to the official challenge shape, where sco
 Then package a records-folder candidate:
 
 ```bash
-uv run pgolf-package-submission \
+.venv/bin/python package_submission_candidate.py \
   --train_results_json ./runs/runpod_h100_8x_10min/h100_8x_trial/results.json \
   --eval_results_json ./runs/runpod_h100_8x_eval/h100_8x_eval/results.json \
   --track track_10min_16mb \

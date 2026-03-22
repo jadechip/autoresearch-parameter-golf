@@ -3,14 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-
-run_python() {
-  if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
-    "$ROOT_DIR/.venv/bin/python" "$@"
-  else
-    uv run python "$@"
-  fi
-}
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 
 AUTORESEARCH_ROOT="${AUTORESEARCH_ROOT:-$ROOT_DIR/runs/autoresearch_5090}"
 RUNS_DIR="${RUNS_DIR:-$AUTORESEARCH_ROOT/runs}"
@@ -28,6 +21,12 @@ ALLOW_UNINITIALIZED_SESSION="${ALLOW_UNINITIALIZED_SESSION:-0}"
 
 mkdir -p "$RUNS_DIR" "$INDEX_DIR"
 
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Missing virtualenv python: $PYTHON_BIN" >&2
+  echo "Run: bash scripts/bootstrap.sh" >&2
+  exit 2
+fi
+
 if [[ -e "$OUTPUT_DIR" ]]; then
   echo "Output directory already exists: $OUTPUT_DIR" >&2
   exit 2
@@ -35,7 +34,7 @@ fi
 
 USE_SESSION_STATE=0
 if [[ -f "$SESSION_JSON" ]]; then
-  run_python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" require-ready >/dev/null
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" require-ready >/dev/null
   USE_SESSION_STATE=1
 elif [[ "$ALLOW_UNINITIALIZED_SESSION" == "1" || "$RUN_ID" == baseline_* ]]; then
   echo "No autoresearch session found at $SESSION_JSON; allowing baseline/manual run." >&2
@@ -54,7 +53,7 @@ fi
 
 cleanup() {
   if [[ "$USE_SESSION_STATE" == "1" && ! -f "$OUTPUT_DIR/results.json" ]]; then
-    run_python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "wrapper_cleanup" >/dev/null 2>&1 || true
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "wrapper_cleanup" >/dev/null 2>&1 || true
   fi
   rm -f "$ACTIVE_JSON"
   rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -81,7 +80,7 @@ cat > "$ACTIVE_JSON" <<EOF
 EOF
 
 if [[ "$USE_SESSION_STATE" == "1" ]]; then
-  run_python "$ROOT_DIR/scripts/autoresearch_state.py" \
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/autoresearch_state.py" \
     --state_dir "$STATE_DIR" \
     start-run \
     --run_id "$RUN_ID" \
@@ -103,12 +102,12 @@ set -e
 
 RESULTS_JSON="$OUTPUT_DIR/results.json"
 if [[ -f "$RESULTS_JSON" ]]; then
-  run_python "$ROOT_DIR/scripts/index_autoresearch_run.py" "$RESULTS_JSON" --index_dir "$INDEX_DIR"
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/index_autoresearch_run.py" "$RESULTS_JSON" --index_dir "$INDEX_DIR"
   if [[ "$USE_SESSION_STATE" == "1" ]]; then
-    run_python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" finish-run --results_json "$RESULTS_JSON" >/dev/null
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" finish-run --results_json "$RESULTS_JSON" >/dev/null
   fi
 elif [[ "$USE_SESSION_STATE" == "1" ]]; then
-  run_python "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "missing_results_json" >/dev/null
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" abort-run --run_id "$RUN_ID" --reason "missing_results_json" >/dev/null
 fi
 
 if [[ $status -ne 0 ]]; then
