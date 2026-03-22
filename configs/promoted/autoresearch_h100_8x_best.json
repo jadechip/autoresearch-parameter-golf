@@ -54,6 +54,11 @@
     "shared_q_low_rank": null,
     "stem_layers": 0,
     "tail_layers": 3,
+    "tail_mlp_hidden_bonuses": [
+      3840,
+      3584,
+      3328
+    ],
     "tie_embeddings": true,
     "vocab_size": 1024
   },
