@@ -106,6 +106,8 @@ class ModelConfig:
     shared_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
     final_tail_smear_gate: bool = False
+    final_tail_xsa_rank: int = 0
+    final_tail_xsa_window: int = 64
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -1336,6 +1338,66 @@ def reallocate_shared_budget_into_near_cap_final_tail_carrier(cfg: TrainConfig) 
     )
 
 
+def add_coarse_final_tail_xsa_on_near_cap_carrier(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.final_tail_xsa_rank > 0 or not model_cfg.tie_embeddings:
+        return
+    if model_cfg.final_tail_smear_gate:
+        return
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
+        return
+    if model_cfg.q_low_rank != model_cfg.d_model // 4 or model_cfg.shared_q_low_rank is not None:
+        return
+    if model_cfg.final_tail_q_low_rank != 0:
+        return
+    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.shared_mlp_fake_quant_during_train is not None:
+        return
+    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if cfg.grad_accum_steps != 2:
+        return
+    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
+        return
+    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    expected_keep_float_patterns = (
+        "norm",
+        "scale",
+        "gain",
+        "adapter",
+        "lm_head",
+        "tok_emb.weight",
+        "tail.2.mlp.",
+        "tail.2.attn.q_proj.weight",
+    )
+    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    model_cfg.final_tail_xsa_rank = model_cfg.d_model // 16
+    model_cfg.final_tail_xsa_window = 64
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2286,6 +2348,75 @@ class GroupedQueryAttention(nn.Module):
         return self.dropout(self.out_proj(attn, slot=slot))
 
 
+class CrossWindowSummaryAttention(nn.Module):
+    def __init__(self, cfg: ModelConfig, *, rank: int, window: int):
+        super().__init__()
+        self.rank = rank
+        self.window = window
+        attn_fake_quant_during_train = (
+            cfg.fake_quant_during_train if cfg.attn_fake_quant_during_train is None else cfg.attn_fake_quant_during_train
+        )
+        self.norm = RMSNorm(cfg.d_model)
+        self.q_proj = FakeQuantLinear(
+            cfg.d_model,
+            rank,
+            bias=False,
+            fake_quant_during_train=attn_fake_quant_during_train,
+            fake_quant_start_step=cfg.fake_quant_start_step,
+        )
+        self.k_proj = FakeQuantLinear(
+            cfg.d_model,
+            rank,
+            bias=False,
+            fake_quant_during_train=attn_fake_quant_during_train,
+            fake_quant_start_step=cfg.fake_quant_start_step,
+        )
+        self.v_proj = FakeQuantLinear(
+            cfg.d_model,
+            rank,
+            bias=False,
+            fake_quant_during_train=attn_fake_quant_during_train,
+            fake_quant_start_step=cfg.fake_quant_start_step,
+        )
+        self.out_proj = FakeQuantLinear(
+            rank,
+            cfg.d_model,
+            bias=False,
+            fake_quant_during_train=attn_fake_quant_during_train,
+            fake_quant_start_step=cfg.fake_quant_start_step,
+            zero_init=True,
+        )
+
+    def set_global_step(self, step: int) -> None:
+        self.q_proj.set_global_step(step)
+        self.k_proj.set_global_step(step)
+        self.v_proj.set_global_step(step)
+        self.out_proj.set_global_step(step)
+
+    def forward(self, x: Tensor) -> Tensor:
+        bsz, seqlen, _ = x.shape
+        if seqlen <= self.window:
+            return torch.zeros_like(x)
+        h = self.norm(x)
+        pad = (-seqlen) % self.window
+        if pad:
+            h = F.pad(h, (0, 0, 0, pad))
+        summary_count = h.size(1) // self.window
+        summaries = h.view(bsz, summary_count, self.window, -1).mean(dim=2)
+        q = self.q_proj(x)
+        k = self.k_proj(summaries)
+        v = self.v_proj(summaries)
+        scores = torch.matmul(q, k.transpose(1, 2)) * (self.rank ** -0.5)
+        token_windows = torch.div(torch.arange(seqlen, device=x.device), self.window, rounding_mode="floor")
+        summary_idx = torch.arange(summary_count, device=x.device)
+        allowed = summary_idx.unsqueeze(0) < token_windows.unsqueeze(1)
+        scores = scores.masked_fill(~allowed.unsqueeze(0), -1e4)
+        attn = torch.softmax(scores, dim=-1)
+        has_context = allowed.any(dim=-1).view(1, seqlen, 1)
+        attn = torch.where(has_context, attn, torch.zeros_like(attn))
+        return self.out_proj(torch.matmul(attn, v))
+
+
 class ReLU2MLP(nn.Module):
     def __init__(
         self,
@@ -2341,6 +2472,8 @@ class TransformerBlock(nn.Module):
         q_low_rank: int | None = None,
         mlp_fake_quant_during_train: bool | None = None,
         smear_gate: bool = False,
+        xsa_rank: int = 0,
+        xsa_window: int = 64,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
@@ -2355,11 +2488,15 @@ class TransformerBlock(nn.Module):
         scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
+        self.xsa = CrossWindowSummaryAttention(cfg, rank=xsa_rank, window=xsa_window) if xsa_rank > 0 else None
+        self.xsa_scale = nn.Parameter(torch.ones(scale_shape)) if xsa_rank > 0 else None
         self.smear_scale = nn.Parameter(torch.zeros(scale_shape)) if smear_gate else None
 
     def set_global_step(self, step: int) -> None:
         self.attn.set_global_step(step)
         self.mlp.set_global_step(step)
+        if self.xsa is not None:
+            self.xsa.set_global_step(step)
 
     def residual_scale(self, scale: nn.Parameter, x: Tensor, slot: int | None) -> Tensor:
         if scale.ndim == 2:
@@ -2380,6 +2517,8 @@ class TransformerBlock(nn.Module):
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
         x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
+        if self.xsa is not None and self.xsa_scale is not None:
+            x = x + self.xsa(x) * self.residual_scale(self.xsa_scale, x, slot)
         if self.smear_scale is not None:
             x = x + self.causal_smear(x) * self.residual_scale(self.smear_scale, x, slot)
         return x
@@ -2422,6 +2561,8 @@ class RecurrentGPT(nn.Module):
                     mlp_fake_quant_during_train=(
                         cfg.final_tail_mlp_fake_quant_during_train if tail_idx == cfg.tail_layers - 1 else None
                     ),
+                    xsa_rank=cfg.final_tail_xsa_rank if tail_idx == cfg.tail_layers - 1 else 0,
+                    xsa_window=cfg.final_tail_xsa_window,
                     smear_gate=cfg.final_tail_smear_gate and tail_idx == cfg.tail_layers - 1,
                 )
                 for tail_idx in range(cfg.tail_layers)
@@ -3275,6 +3416,12 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
+    if cfg.model.final_tail_xsa_rank < 0:
+        raise ConfigError("final_tail_xsa_rank must be >= 0")
+    if cfg.model.final_tail_xsa_rank > cfg.model.d_model:
+        raise ConfigError("final_tail_xsa_rank must be <= d_model")
+    if cfg.model.final_tail_xsa_window < 2:
+        raise ConfigError("final_tail_xsa_window must be >= 2")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
@@ -4172,6 +4319,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_final_tail_smear_gate_on_shared_float_compact_line(cfg)
     restore_shared_low_rank_q_on_smear_gate_shared_float_carrier(cfg)
     reallocate_shared_budget_into_near_cap_final_tail_carrier(cfg)
+    add_coarse_final_tail_xsa_on_near_cap_carrier(cfg)
     return cfg
 
 
