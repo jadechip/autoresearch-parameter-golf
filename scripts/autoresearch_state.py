@@ -17,6 +17,7 @@ SEARCH_MIN_MEANINGFUL_BPB_GAIN = 0.001
 SEARCH_ARTIFACT_TARGET_BYTES_MIN = 12_000_000
 SEARCH_ARTIFACT_TARGET_BYTES_MAX = 15_500_000
 SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS = 3
+SEARCH_MAX_CONSECUTIVE_SAME_FAMILY = 2
 SEARCH_STRUCTURAL_AXES = [
     "d_model",
     "shared_layers_vs_recurrence_loops",
@@ -40,6 +41,79 @@ SEARCH_NEXT_PRIORITY_AXES = [
     "selective higher precision for embeddings or head",
     "compute-aware batch and context curricula",
     "smarter local-token modules with better byte/quality tradeoffs",
+]
+SEARCH_BRANCH_FAMILIES = [
+    "carrier_repartition",
+    "low_rank_q_reallocation",
+    "selective_precision_or_quantization",
+    "batch_or_context_curriculum",
+    "local_token_module",
+    "xsa_or_cache",
+    "checkpoint_soup_or_ptq",
+    "smeargate_or_ttt",
+    "canon_or_neighbor_mixer",
+]
+SEARCH_MICRO_TUNING_MARKERS = [
+    "single tensor float or fake-quant toggle on an otherwise unchanged carrier",
+    "narrowing or widening a float/QAT exemption set without changing carrier topology",
+    "small hidden-bonus retunes on the same accepted carrier",
+    "one-step or near-neighbor batch tweaks on the same accepted carrier",
+]
+SEARCH_CAMPAIGN_STORIES = [
+    {
+        "id": "near_full_budget_carrier",
+        "family": "carrier_repartition",
+        "kind": "existing_surface",
+        "goal": "Move to a stronger near-cap carrier with more unique depth, less recurrence, and more deliberate byte spending.",
+    },
+    {
+        "id": "low_rank_q_reallocation",
+        "family": "low_rank_q_reallocation",
+        "kind": "existing_surface",
+        "goal": "Use low-rank or factored Q to buy a stronger carrier, better local module, or more steps.",
+    },
+    {
+        "id": "late_selective_quantization",
+        "family": "selective_precision_or_quantization",
+        "kind": "existing_surface",
+        "goal": "Try coarse late selective quantization or selective higher precision without slicing single tensors forever.",
+    },
+    {
+        "id": "context_curriculum",
+        "family": "batch_or_context_curriculum",
+        "kind": "existing_surface",
+        "goal": "Trade batch and sequence length deliberately, including 1024/1536 to 2048 curricula when compute allows.",
+    },
+    {
+        "id": "smarter_local_token_module",
+        "family": "local_token_module",
+        "kind": "module_writing",
+        "goal": "Add a better byte-quality local-token module such as a factorized bigram, top-N exact plus hashed tail, or a lightweight neighbor mixer.",
+    },
+    {
+        "id": "xsa_or_top_layer_cache",
+        "family": "xsa_or_cache",
+        "kind": "module_writing",
+        "goal": "Implement a self-contained XSA or top-layer cross-window cache branch that preserves causal scoring and eval-budget validity.",
+    },
+    {
+        "id": "checkpoint_soup_or_ptq",
+        "family": "checkpoint_soup_or_ptq",
+        "kind": "existing_surface",
+        "goal": "Select or average warmdown checkpoints based on post-quant quality instead of assuming the best float checkpoint is best after quantization.",
+    },
+    {
+        "id": "smeargate_or_ttt",
+        "family": "smeargate_or_ttt",
+        "kind": "module_writing",
+        "goal": "Probe a separate SmearGate or TTT-style branch without stacking it onto XSA by default.",
+    },
+    {
+        "id": "canon_or_neighbor_mixer",
+        "family": "canon_or_neighbor_mixer",
+        "kind": "module_writing",
+        "goal": "Try one localized Canon-style or neighboring-token mixing insert rather than a full architecture pivot.",
+    },
 ]
 SEARCH_DO_NOT_OVERWEIGHT = [
     "Do not cargo-cult leaderboard entries.",
@@ -180,9 +254,15 @@ def default_search_policy() -> dict[str, Any]:
         "artifact_target_bytes_min": SEARCH_ARTIFACT_TARGET_BYTES_MIN,
         "artifact_target_bytes_max": SEARCH_ARTIFACT_TARGET_BYTES_MAX,
         "max_consecutive_losing_micro_experiments": SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS,
+        "max_consecutive_same_family_runs": SEARCH_MAX_CONSECUTIVE_SAME_FAMILY,
+        "story_selection_mode": "one_story_per_iteration",
+        "allow_train_py_module_writes": True,
         "structural_axes": list(SEARCH_STRUCTURAL_AXES),
         "external_priors": list(SEARCH_EXTERNAL_PRIORS),
         "next_priority_axes": list(SEARCH_NEXT_PRIORITY_AXES),
+        "branch_families": list(SEARCH_BRANCH_FAMILIES),
+        "campaign_stories": [dict(story) for story in SEARCH_CAMPAIGN_STORIES],
+        "micro_tuning_markers": list(SEARCH_MICRO_TUNING_MARKERS),
         "do_not_overweight": list(SEARCH_DO_NOT_OVERWEIGHT),
     }
 
@@ -314,6 +394,13 @@ def ensure_notes_file(state_dir: Path) -> None:
         f"- Soft artifact target band for 5090 search: {SEARCH_ARTIFACT_TARGET_BYTES_MIN:,} to {SEARCH_ARTIFACT_TARGET_BYTES_MAX:,} bytes.\n"
         f"- Meaningful improvement threshold: about {SEARCH_MIN_MEANINGFUL_BPB_GAIN:.3f} val_bpb.\n"
         f"- Do not spend more than {SEARCH_MAX_CONSECUTIVE_MICRO_EXPERIMENTS} consecutive losing micro-tuning runs without a structural / byte-allocation experiment.\n\n"
+        "Current exploitation trap:\n"
+        "- Selective float or fake-quant toggles on one or two late tensors count as micro-tuning, not structural exploration.\n"
+        "- If the recent history is dominated by one branch family, force a branch switch before another local refinement.\n\n"
+        "Ralph-style story rule:\n"
+        "- Pick exactly one named campaign story per iteration and advance it with one experiment.\n"
+        "- If a chosen story needs a missing self-contained module in `train.py`, implement it instead of falling back to a safer micro-tune.\n"
+        "- Keep module-writing stories isolated; do not stack XSA, cache, SmearGate, TTT, and Canon in one shot.\n\n"
         "Structural campaign checklist:\n"
         "- [ ] d_model\n"
         "- [ ] shared_layers vs recurrence_loops\n"
@@ -321,6 +408,22 @@ def ensure_notes_file(state_dir: Path) -> None:
         "- [ ] mlp_mult\n"
         "- [ ] adapter_rank / adapter_targets\n"
         "- [ ] fake_quant_start_step / clip_percentile\n\n"
+        "Branch rotation checklist:\n"
+        "- [ ] carrier repartition / depth / width\n"
+        "- [ ] low-rank Q placement / strength\n"
+        "- [ ] selective precision / quantization\n"
+        "- [ ] batch / context curriculum\n"
+        "- [ ] local-token module\n\n"
+        "Named campaign stories:\n"
+        "- [ ] near_full_budget_carrier\n"
+        "- [ ] low_rank_q_reallocation\n"
+        "- [ ] late_selective_quantization\n"
+        "- [ ] context_curriculum\n"
+        "- [ ] smarter_local_token_module\n"
+        "- [ ] xsa_or_top_layer_cache\n"
+        "- [ ] checkpoint_soup_or_ptq\n"
+        "- [ ] smeargate_or_ttt\n"
+        "- [ ] canon_or_neighbor_mixer\n\n"
         "Frontier priors:\n"
         "- Spend bytes deliberately if the accepted line is still well below the hard `16 MB` cap.\n"
         "- Prefer a stronger near-full-budget carrier over more recurrence or more shrinkage.\n"

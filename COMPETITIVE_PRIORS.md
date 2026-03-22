@@ -158,12 +158,14 @@ Medium complexity:
 - partial RoPE variants
 - train-time init or gating changes
 
-Stretch ideas for later, not first 5090 restart:
+Module-writing campaigns that the loop may now seed deliberately when recent history is too narrow:
 
 - XSA
 - cross-window neural cache / top-layer KV cache
 - SmearGate + meta-TTT branch
 - Canon inserts
+
+These are no longer "never touch" ideas. They are branch stories that should be attempted one at a time, with minimal self-contained implementations rather than blended stacks.
 
 ## Next Search Directions
 
@@ -184,3 +186,33 @@ For the next serious 5090 restart:
 - Do not stack every local-context trick into one line.
 - Do not keep revisiting recurrence, shared-core looping, or tiny-model compression as a main line of attack.
 - Avoid doc-isolated eval at stride 64 as a standalone trick.
+
+## Current Loop Failure Mode
+
+The current Codex loop can drift into narrow exploitation of one accepted carrier, especially:
+
+- selective float / fake-quant toggles on one or two late tensors
+- repeated narrowing of which final-tail tensors stay float
+- near-neighbor batch tweaks without a carrier change
+
+Treat those as micro-tunes, not structural exploration.
+
+If the recent git history is dominated by one family for 3 or more consecutive runs, the next run should be a forced branch switch into one of:
+
+- carrier repartition / depth / width
+- low-rank Q placement or strength
+- batch / context curriculum
+- local-token module
+- a qualitatively different selective-quantization branch
+- XSA or top-layer cache
+- SmearGate / TTT
+- Canon or neighboring-token mixer
+
+## Ralph-Style Campaign Rule
+
+Treat the search as a story board, not as free-form mutation roulette:
+
+- Pick exactly one named campaign story per iteration.
+- If recent history is narrow, switch stories before refining.
+- If a story requires a missing self-contained module in `train.py`, implement the module instead of downgrading the story to a precision micro-tune.
+- Keep module-writing stories isolated so the result is interpretable and easy to revert.

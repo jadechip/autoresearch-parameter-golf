@@ -23,6 +23,7 @@ At the start of a session, inspect:
 - `runs/autoresearch_5090/index/best.json`
 
 Use git history as the experiment memory for what has already been tried and what has already won.
+Use `.venv/bin/python scripts/summarize_recent_autoresearch.py --limit 12` as a compact novelty check before choosing the next mutation.
 
 Accepted-state policy:
 
@@ -38,7 +39,8 @@ Accepted-state policy:
 - You may also update `.autoresearch/notes.md` as local session memory for hypotheses and outcomes.
 - You may change hyperparameters, defaults, schedules, adapter placement, quantization behavior, and model/training details inside `train.py`.
 - Architecture changes inside the current baseline family are allowed and expected.
-- Keep the default architecture recognizable unless a replacement is clearly better and backed by measured results.
+- Self-contained module additions inside `train.py` are also allowed when they preserve autoregressive causality, export/reload, artifact accounting, and structured results.
+- Keep the decoder-only submission regime recognizable unless a replacement is clearly better and backed by measured results.
 
 ## What You Must Not Rely On
 
@@ -83,7 +85,7 @@ Use structured files instead:
 - Crash fast on invalid configs.
 - Keep `train.py` as the main mutation target.
 
-Keep the baseline family intact:
+Keep the competition invariants intact:
 
 - decoder-only LM
 - tied embeddings
@@ -96,7 +98,7 @@ Keep the baseline family intact:
 - QAT-aware training
 - row-wise INT8 export + zlib packing
 
-You may reallocate capacity within this family, but do not wander into unrelated architecture rewrites.
+You may reallocate capacity within this family and add self-contained local modules that still fit the same submission and export discipline. Do not wander into unrelated training stacks or infra rewrites.
 
 Current recovered search baseline:
 
@@ -165,13 +167,16 @@ Split the next serious search into clean branches instead of one blended stack:
 - late selective quantization / post-quant soup
 - low-rank Q
 - smarter local-token module
+- XSA or top-layer cache
+- SmearGate / TTT
+- Canon or neighboring-token mixer
 
-Treat these as stretch directions unless the simpler branches are working:
+Treat the branch list in `.autoresearch/session.json["search_policy"]["campaign_stories"]` as a Ralph-style story board:
 
-- XSA
-- cross-window or top-layer KV cache
-- SmearGate + TTT-style branches
-- Canon inserts
+- pick exactly one story per iteration
+- do not blur multiple module-writing stories into one change
+- if recent history is narrow, force a story switch rather than another local refinement
+- if the chosen story needs a missing self-contained module in `train.py`, implement it instead of collapsing back to a safe micro-tune
 
 In a fresh session, the first search block should deliberately cover structural axes before settling into local hill-climbing:
 
@@ -211,6 +216,10 @@ Avoid spending time on:
 - Reject hacks that add complexity for tiny gains.
 - If accepted artifact size is still below the policy target band, do not spend long stretches only micro-tuning optimizer values.
 - Do not spend more than `3` consecutive losing micro-tuning runs without making the next run a structural / byte-allocation experiment.
+- Treat selective float / fake-quant toggles on one or two tensors of the same carrier as micro-tuning, not structural exploration.
+- If the recent-family summary shows a dominant family or a same-family streak of `3+`, force the next run into a different branch family.
+- If the branch switch points to a module-writing story, prefer a minimal working implementation in `train.py` over another carrier-local precision retune.
+- If the accepted artifact is already above roughly `14 MB`, stop slicing late-tensor float groups finer unless the same run also changes carrier structure, batch/context, low-rank-Q placement, or local-token structure.
 - Alternate broader structural probes with local refinements once you find a promising larger-capacity direction.
 - Keep code changes local and legible.
 - If a change risks export/reload parity or structured outputs, do not ship it without tests.

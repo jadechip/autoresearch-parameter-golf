@@ -30,7 +30,7 @@ Before doing anything else:
 - if you are not already on a dedicated autoresearch branch, create one yourself with a timestamped name like autoresearch/20260319-153000
 - inspect recent commits on that branch
 - inspect .autoresearch/session.json and do not start experimenting unless it exists and status=ready
-- inspect `.autoresearch/session.json["search_policy"]` and `.autoresearch/notes.md`
+- inspect `.autoresearch/session.json["search_policy"]`, `.autoresearch/session.json["search_policy"]["campaign_stories"]`, and `.autoresearch/notes.md`
 - inspect runs/autoresearch_5090/index/best.json
 
 Git policy for this session:
@@ -61,13 +61,14 @@ Secondary constraints:
 - prefer simplicity
 
 Rules:
-- Edit only `train.py` and the local session file `.autoresearch/notes.md`.
-- Do not modify prepare.py, helper scripts, docs, or dependencies.
+- Edit `train.py` and the local session file `.autoresearch/notes.md`.
+- A chosen campaign story may add a missing self-contained module inside `train.py`; do not retreat to a safer micro-tune just because the module does not exist yet.
+- Do not modify prepare.py, docs, or dependencies. Avoid helper-script changes unless a new architecture capability cannot be tested honestly without a minimal structured-output-safe change.
 - Run one experiment at a time with: bash scripts/run_autoresearch_experiment.sh
 - Use runs/autoresearch_5090/index/latest.json and runs/autoresearch_5090/index/best.json as the control surface.
 - Do not scrape stdout or rely on run.log.
 - Treat runs/autoresearch_5090/index/best.json as numeric telemetry, not the sole source of truth for accepted state.
-- Architecture changes inside the current decoder-only / tied-embedding / GQA / RoPE / RMSNorm / ReLU^2 baseline family are allowed and encouraged.
+- Architecture changes inside the current decoder-only / tied-embedding / GQA / RoPE / RMSNorm / ReLU^2 regime are allowed and encouraged, including self-contained module additions that preserve causal scoring, export/reload, and artifact accounting.
 - Do not chase 5090-only hacks that are unlikely to matter on H100.
 - Treat `COMPETITIVE_PRIORS.md` as the current research brief. The recovered compact baseline is now in the wrong regime for a likely win, so prefer deliberate capacity spending and leaderboard-informed search over more shrinkage.
 - If accepted artifact size remains below the search-policy target band, prefer bounded architecture and byte-allocation experiments over endless optimizer micro-tuning.
@@ -78,13 +79,19 @@ Rules:
   - Branch B: late selective quantization or post-quant checkpoint soup on top of a stronger carrier
   - Branch C: low-rank Q as a structural reallocation tool
   - Branch D: smarter local-token module, one family at a time
+- Treat `.autoresearch/session.json["search_policy"]["campaign_stories"]` as a Ralph-style story list and advance exactly one story per iteration.
+- Module-writing stories are allowed:
+  - XSA or top-layer cache
+  - smarter local-token module
+  - SmearGate or TTT-style branch
+  - Canon or neighboring-token mixer insert
 - Prioritize immediate directions that fit the current repo:
   - low-rank Q
   - late selective coarse-group quantization
   - selective higher precision for embeddings / head
   - compute-aware batch / context curricula
   - simpler local-token modules
-- Treat these as stretch directions unless the simpler branches are working:
+- Do not leave these as permanent stretch ideas if recent history is narrow; explicitly seed them when branch rotation forces a broader move:
   - XSA
   - cross-window or top-layer KV cache
   - SmearGate + TTT-style branches
@@ -98,6 +105,8 @@ Rules:
   - compensated global `mlp_mult=3`
   - pure tail-width nudges
 - Use `.autoresearch/notes.md` as a durable ledger of open, tried, winning, and rejected structural hypotheses.
+- Run `.venv/bin/python scripts/summarize_recent_autoresearch.py --limit 12` before choosing a new mutation. If it reports a dominant family or a same-family streak of 3+, treat the next run as a forced branch switch.
+- If branch rotation forces a switch and the current code surface does not already expose the chosen architecture, write the missing self-contained module in `train.py` instead of collapsing back to a selective-float tweak.
 - If a run fails, inspect crash.json and fix only if the idea still seems sound.
 - Before each run, commit the exact train.py experiment to the current autoresearch branch.
 - Include the experiment idea in the pre-run commit message.
@@ -109,6 +118,8 @@ Rules:
 - If a run is accepted, commit the refreshed tracked files under `state/autoresearch/` and `configs/promoted/` so a fresh 5090 or H100 host can recover the winner from git alone.
 - After each keep/revert decision, update `.autoresearch/notes.md` with a short note about what hypothesis was tested and whether it won, lost, or remains unresolved.
 - Use recent git history as memory so you do not repeat the same weak ideas.
+- Treat selective float / fake-quant toggles on one or two tensors, or narrowing an existing exemption set, as micro-tuning rather than structural exploration.
+- If the accepted artifact is already above roughly `14 MB`, do not keep slicing late-tensor float groups finer unless the same run also changes carrier structure, batch/context, low-rank-Q placement, or local-token structure.
 - Keep one experiment per code change.
 - Keep the branch tip equal to the current accepted candidate.
 - Continue iterating autonomously until interrupted.
