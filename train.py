@@ -104,6 +104,7 @@ class ModelConfig:
     qk_gain_init: float = 1.0
     q_low_rank: int = 0
     shared_q_low_rank: int | None = None
+    penultimate_tail_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
     final_tail_smear_gate: bool = False
     fake_quant_during_train: bool = True
@@ -1336,6 +1337,64 @@ def reallocate_shared_budget_into_near_cap_final_tail_carrier(cfg: TrainConfig) 
     )
 
 
+def reallocate_shared_q_into_last_two_tail_blocks_on_near_cap_carrier(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.final_tail_smear_gate or not model_cfg.tie_embeddings:
+        return
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 1 or model_cfg.recurrence_loops != 1 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != model_cfg.d_model:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 6:
+        return
+    if model_cfg.q_low_rank != model_cfg.d_model // 4 or model_cfg.shared_q_low_rank is not None:
+        return
+    if model_cfg.penultimate_tail_q_low_rank is not None or model_cfg.final_tail_q_low_rank != 0:
+        return
+    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.shared_mlp_fake_quant_during_train is not None:
+        return
+    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if cfg.grad_accum_steps != 2:
+        return
+    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
+        return
+    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    expected_keep_float_patterns = (
+        "norm",
+        "scale",
+        "gain",
+        "adapter",
+        "lm_head",
+        "tok_emb.weight",
+        "tail.2.mlp.",
+        "tail.2.attn.q_proj.weight",
+    )
+    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    model_cfg.shared_q_low_rank = model_cfg.d_model // 8
+    model_cfg.penultimate_tail_q_low_rank = 0
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2389,6 +2448,9 @@ class RecurrentGPT(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
+        penultimate_tail_q_low_rank = (
+            cfg.q_low_rank if cfg.penultimate_tail_q_low_rank is None else cfg.penultimate_tail_q_low_rank
+        )
         final_tail_q_low_rank = cfg.q_low_rank if cfg.final_tail_q_low_rank is None else cfg.final_tail_q_low_rank
         non_recurrent_hidden_bonus = (
             cfg.non_recurrent_mlp_hidden_bonus
@@ -2418,7 +2480,11 @@ class RecurrentGPT(nn.Module):
                     cfg,
                     num_adapter_slots=0,
                     mlp_hidden_bonus=non_recurrent_hidden_bonus,
-                    q_low_rank=final_tail_q_low_rank if tail_idx == cfg.tail_layers - 1 else None,
+                    q_low_rank=(
+                        final_tail_q_low_rank
+                        if tail_idx == cfg.tail_layers - 1
+                        else penultimate_tail_q_low_rank if tail_idx == cfg.tail_layers - 2 else None
+                    ),
                     mlp_fake_quant_during_train=(
                         cfg.final_tail_mlp_fake_quant_during_train if tail_idx == cfg.tail_layers - 1 else None
                     ),
@@ -3271,6 +3337,10 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("shared_q_low_rank must be >= 0 when set")
     if cfg.model.shared_q_low_rank is not None and cfg.model.shared_q_low_rank >= cfg.model.d_model:
         raise ConfigError("shared_q_low_rank must be smaller than d_model when set")
+    if cfg.model.penultimate_tail_q_low_rank is not None and cfg.model.penultimate_tail_q_low_rank < 0:
+        raise ConfigError("penultimate_tail_q_low_rank must be >= 0 when set")
+    if cfg.model.penultimate_tail_q_low_rank is not None and cfg.model.penultimate_tail_q_low_rank >= cfg.model.d_model:
+        raise ConfigError("penultimate_tail_q_low_rank must be smaller than d_model when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank < 0:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
@@ -4172,6 +4242,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_final_tail_smear_gate_on_shared_float_compact_line(cfg)
     restore_shared_low_rank_q_on_smear_gate_shared_float_carrier(cfg)
     reallocate_shared_budget_into_near_cap_final_tail_carrier(cfg)
+    reallocate_shared_q_into_last_two_tail_blocks_on_near_cap_carrier(cfg)
     return cfg
 
 
