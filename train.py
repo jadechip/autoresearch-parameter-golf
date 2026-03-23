@@ -107,6 +107,7 @@ class ModelConfig:
     shared_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
     final_tail_smear_gate: bool = False
+    final_tail_neighbor_mixer: bool = False
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -1811,6 +1812,74 @@ def restore_short_to_full_context_on_branch_tip_three_block_carrier(cfg: TrainCo
     cfg.train_seq_len_min = 640
 
 
+def add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if model_cfg.final_tail_neighbor_mixer or not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
+        return
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
+        return
+    half_step = model_cfg.d_model // 2
+    expected_tail_bonuses = (
+        model_cfg.non_recurrent_mlp_hidden_bonus + half_step,
+        model_cfg.non_recurrent_mlp_hidden_bonus,
+        model_cfg.non_recurrent_mlp_hidden_bonus - half_step,
+    )
+    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
+        return
+    if model_cfg.q_low_rank != model_cfg.d_model // 4:
+        return
+    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank != 0:
+        return
+    if model_cfg.penultimate_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.shared_mlp_fake_quant_during_train is not None:
+        return
+    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if cfg.grad_accum_steps != 2:
+        return
+    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
+        return
+    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    expected_keep_float_patterns = (
+        "norm",
+        "scale",
+        "gain",
+        "adapter",
+        "lm_head",
+        "tok_emb.weight",
+        "tail.2.mlp.",
+        "tail.2.attn.q_proj.weight",
+        "tail.2.attn.out_proj.weight",
+    )
+    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    model_cfg.final_tail_neighbor_mixer = True
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2816,6 +2885,7 @@ class TransformerBlock(nn.Module):
         q_low_rank: int | None = None,
         mlp_fake_quant_during_train: bool | None = None,
         smear_gate: bool = False,
+        neighbor_mixer: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
@@ -2831,6 +2901,8 @@ class TransformerBlock(nn.Module):
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
         self.smear_scale = nn.Parameter(torch.zeros(scale_shape)) if smear_gate else None
+        self.neighbor_norm = RMSNorm(cfg.d_model) if neighbor_mixer else None
+        self.neighbor_scale = nn.Parameter(torch.zeros(scale_shape)) if neighbor_mixer else None
 
     def set_global_step(self, step: int) -> None:
         self.attn.set_global_step(step)
@@ -2852,11 +2924,19 @@ class TransformerBlock(nn.Module):
         mean = prefix / safe_counts
         return torch.where(counts > 0, mean, torch.zeros_like(mean))
 
+    def causal_neighbor(self, x: Tensor) -> Tensor:
+        if x.size(1) <= 1:
+            return torch.zeros_like(x)
+        return torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
+
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
         x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         if self.smear_scale is not None:
             x = x + self.causal_smear(x) * self.residual_scale(self.smear_scale, x, slot)
+        if self.neighbor_scale is not None:
+            assert self.neighbor_norm is not None
+            x = x + self.causal_neighbor(self.neighbor_norm(x)) * self.residual_scale(self.neighbor_scale, x, slot)
         return x
 
 
@@ -2909,6 +2989,7 @@ class RecurrentGPT(nn.Module):
                         )
                     ),
                     smear_gate=cfg.final_tail_smear_gate and tail_idx == cfg.tail_layers - 1,
+                    neighbor_mixer=cfg.final_tail_neighbor_mixer and tail_idx == cfg.tail_layers - 1,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -3769,6 +3850,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
+    if cfg.model.final_tail_smear_gate and cfg.model.final_tail_neighbor_mixer:
+        raise ConfigError("final_tail_smear_gate and final_tail_neighbor_mixer cannot both be enabled")
     if cfg.model.penultimate_tail_mlp_fake_quant_during_train is not None and cfg.model.tail_layers < 2:
         raise ConfigError("penultimate_tail_mlp_fake_quant_during_train requires at least 2 tail layers")
     if cfg.grad_accum_steps <= 0:
@@ -4675,6 +4758,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     disable_penultimate_tail_mlp_fake_quant_on_full_context_three_block_carrier(cfg)
     keep_final_attention_out_proj_float_on_full_context_three_block_carrier(cfg)
     restore_short_to_full_context_on_branch_tip_three_block_carrier(cfg)
+    add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg)
     return cfg
 
 
