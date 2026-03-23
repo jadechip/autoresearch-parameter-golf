@@ -109,6 +109,7 @@ class ModelConfig:
     tail_q_low_ranks: tuple[int, ...] | None = None
     final_tail_smear_gate: bool = False
     final_tail_neighbor_mixer: bool = False
+    split_bigram_head: bool = False
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -2042,6 +2043,84 @@ def move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg: Tra
     )
 
 
+def replace_branch_tip_neighbor_with_split_bigram_head(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if not model_cfg.final_tail_neighbor_mixer or model_cfg.final_tail_smear_gate or model_cfg.split_bigram_head:
+        return
+    if not model_cfg.tie_embeddings:
+        return
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
+        return
+    expected_tail_bonuses = (
+        model_cfg.d_model * 8,
+        model_cfg.d_model * 7,
+        model_cfg.d_model * 49 // 8,
+    )
+    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
+        return
+    if model_cfg.q_low_rank != model_cfg.d_model // 4:
+        return
+    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank is not None:
+        return
+    if model_cfg.tail_q_low_ranks != (0, model_cfg.q_low_rank, model_cfg.d_model // 8):
+        return
+    if model_cfg.penultimate_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.shared_mlp_fake_quant_during_train is not None:
+        return
+    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if cfg.grad_accum_steps != 2:
+        return
+    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
+        return
+    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    expected_keep_float_patterns = (
+        "norm",
+        "scale",
+        "gain",
+        "adapter",
+        "lm_head",
+        "tok_emb.weight",
+        "tail.2.mlp.",
+        "tail.2.attn.q_proj.down_proj.weight",
+        "tail.2.attn.q_proj.up_proj.weight",
+        "tail.2.attn.out_proj.weight",
+    )
+    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    model_cfg.final_tail_neighbor_mixer = False
+    model_cfg.split_bigram_head = True
+    model_cfg.tail_mlp_hidden_bonuses = (
+        expected_tail_bonuses[0],
+        expected_tail_bonuses[1],
+        expected_tail_bonuses[2] - model_cfg.d_model * 3 // 4,
+    )
+
+
 def reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if not model_cfg.final_tail_neighbor_mixer or not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
@@ -3122,6 +3201,65 @@ class ReLU2MLP(nn.Module):
         return self.dropout(self.proj(x, slot=slot))
 
 
+SPLIT_BIGRAM_EXACT_TOKEN_IDS = (
+    960, 962, 267, 946, 939, 287, 280, 290, 292, 285, 261, 957, 291, 940, 941, 276, 266, 942, 268, 282, 274, 286,
+    943, 951, 944, 288, 947, 949, 954, 970, 277, 953, 945, 289, 972, 262, 323, 304, 321, 955, 968, 293, 271, 294,
+    270, 959, 279, 309, 281, 264, 313, 948, 976, 346, 295, 284, 275, 320, 952, 326, 317, 337, 956, 315, 260, 265,
+    311, 345, 319, 950, 325, 983, 958, 314, 310, 318, 352, 341, 348, 298, 278, 303, 344, 963, 961, 988, 340, 269,
+    353, 322, 343, 297, 335, 327, 370, 366, 356, 330, 299, 296, 334, 987, 336, 386, 302, 307, 381, 342, 361, 329,
+    350, 360, 363, 301, 407, 272, 387, 420, 404, 308, 362, 364, 324, 405, 994, 383, 349, 358, 388, 300, 995, 354,
+    400, 991, 403, 379, 338, 965, 395, 333, 413, 967, 422, 312, 367, 421, 412, 371, 425, 430, 391, 402, 446, 351,
+    424, 373, 1000, 437, 998, 408, 328, 372, 382, 435, 411, 347, 436, 980, 432, 418, 966, 283, 397, 974, 316, 305,
+    409, 444, 449, 417, 410, 434, 426, 415, 454, 450, 378, 263, 355, 1002, 456, 398, 1003, 964, 429, 466, 438, 969,
+    463, 332, 480, 439, 473, 459, 1008, 468, 431, 273, 331, 472, 491, 986, 474, 496, 384, 380, 495, 979, 419, 445,
+    476, 393, 442, 993, 414, 502, 479, 486, 1010, 406, 490, 498, 488, 441, 492, 451, 493, 529, 1013, 503, 985, 427,
+    428, 399, 523, 494, 507, 517, 499, 359, 511, 389, 973, 999, 376, 1009, 978, 506, 501, 971, 452, 521, 469, 461,
+    509, 533, 526, 573, 357, 576, 518, 453, 536, 539, 522, 527, 537, 467, 556, 465, 984, 538, 374, 528, 552, 508,
+    500, 566, 531, 542, 460, 390, 1, 423, 532, 448, 547, 530, 564, 551, 596, 561, 567, 416, 557, 559, 553, 1012,
+    555, 548, 581, 572, 478, 582, 377, 560, 575, 571, 396, 401, 546, 544, 568, 588, 605, 590, 482, 585, 587, 563,
+    565, 589, 554, 586, 365, 603, 597, 577, 487, 583, 610, 604, 385, 611, 593, 591, 616, 592, 584, 600, 601, 504,
+    594, 485, 623, 569, 990, 975, 606, 607, 520, 613, 615, 579, 670, 471, 661, 632, 620, 505, 675, 635, 668, 650,
+    618, 638, 636, 1015, 626, 659, 630, 614, 484, 627,
+)
+SPLIT_BIGRAM_HASH_BUCKETS = 512
+SPLIT_BIGRAM_HASH_RANK = 48
+
+
+class SplitExactHashBigramHead(nn.Module):
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        if cfg.vocab_size <= max(SPLIT_BIGRAM_EXACT_TOKEN_IDS):
+            raise ConfigError("split_bigram_head expects the 1024-token autoresearch vocabulary")
+        self.exact_rows = nn.Embedding(len(SPLIT_BIGRAM_EXACT_TOKEN_IDS), cfg.vocab_size)
+        row_index = torch.full((cfg.vocab_size,), -1, dtype=torch.long)
+        exact_ids = torch.tensor(SPLIT_BIGRAM_EXACT_TOKEN_IDS, dtype=torch.long)
+        row_index[exact_ids] = torch.arange(exact_ids.numel(), dtype=torch.long)
+        self.register_buffer("exact_row_index", row_index, persistent=False)
+        self.hash_table = nn.Embedding(SPLIT_BIGRAM_HASH_BUCKETS, SPLIT_BIGRAM_HASH_RANK)
+        self.hash_proj = FakeQuantLinear(
+            SPLIT_BIGRAM_HASH_RANK,
+            cfg.vocab_size,
+            bias=False,
+            fake_quant_during_train=cfg.fake_quant_during_train,
+            fake_quant_start_step=cfg.fake_quant_start_step,
+            zero_init=True,
+        )
+        nn.init.zeros_(self.exact_rows.weight)
+        nn.init.normal_(self.hash_table.weight, mean=0.0, std=cfg.emb_init_std)
+
+    def set_global_step(self, step: int) -> None:
+        self.hash_proj.set_global_step(step)
+
+    def forward(self, input_ids: Tensor, dtype: torch.dtype) -> Tensor:
+        row_idx = self.exact_row_index[input_ids]
+        exact_logits = self.exact_rows(row_idx.clamp_min(0)).to(dtype=dtype)
+        bucket_ids = torch.remainder(input_ids.to(dtype=torch.int64) * 1_315_423_911, SPLIT_BIGRAM_HASH_BUCKETS).to(
+            dtype=torch.long
+        )
+        hash_logits = self.hash_proj(self.hash_table(bucket_ids)).to(dtype=dtype)
+        return torch.where(row_idx.unsqueeze(-1) >= 0, exact_logits, hash_logits)
+
+
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -3246,6 +3384,7 @@ class RecurrentGPT(nn.Module):
             ]
         )
         self.final_norm = RMSNorm(cfg.d_model)
+        self.split_bigram_head = SplitExactHashBigramHead(cfg) if cfg.split_bigram_head else None
         self.lm_head = None if cfg.tie_embeddings else FakeQuantLinear(
             cfg.d_model,
             cfg.vocab_size,
@@ -3261,6 +3400,8 @@ class RecurrentGPT(nn.Module):
             nn.init.zeros_(self.lm_head.weight)
 
     def set_global_step(self, step: int) -> None:
+        if self.split_bigram_head is not None:
+            self.split_bigram_head.set_global_step(step)
         if self.lm_head is not None:
             self.lm_head.set_global_step(step)
         for block in self.stem:
@@ -3286,6 +3427,8 @@ class RecurrentGPT(nn.Module):
             if self.lm_head is None:
                 raise RuntimeError("lm_head missing while tie_embeddings=False")
             logits = self.lm_head(x)
+        if self.split_bigram_head is not None:
+            logits = logits + self.split_bigram_head(input_ids, logits.dtype)
         logits = self.cfg.logit_softcap * torch.tanh(logits / self.cfg.logit_softcap)
         loss = None
         if target_ids is not None:
@@ -4115,6 +4258,8 @@ def validate_config(cfg: TrainConfig) -> None:
                 raise ConfigError("tail_q_low_ranks entries must be smaller than d_model")
     if cfg.model.final_tail_smear_gate and cfg.model.final_tail_neighbor_mixer:
         raise ConfigError("final_tail_smear_gate and final_tail_neighbor_mixer cannot both be enabled")
+    if cfg.model.split_bigram_head and (cfg.model.final_tail_smear_gate or cfg.model.final_tail_neighbor_mixer):
+        raise ConfigError("split_bigram_head cannot be combined with final-tail local mixers")
     if cfg.model.penultimate_tail_mlp_fake_quant_during_train is not None and cfg.model.tail_layers < 2:
         raise ConfigError("penultimate_tail_mlp_fake_quant_during_train requires at least 2 tail layers")
     if cfg.grad_accum_steps <= 0:
@@ -5024,6 +5169,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg)
     front_load_tail_width_on_branch_tip_neighbor_carrier(cfg)
     move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg)
+    replace_branch_tip_neighbor_with_split_bigram_head(cfg)
     reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg)
     return cfg
 
