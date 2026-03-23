@@ -1882,7 +1882,7 @@ def add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg: TrainCo
         return
     model_cfg.final_tail_neighbor_mixer = True
 
-def front_load_tail_width_on_branch_tip_neighbor_carrier(cfg: TrainConfig) -> None:
+def fund_final_tail_mlp_from_first_tail_q_on_branch_tip_neighbor_carrier(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if not model_cfg.final_tail_neighbor_mixer or not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
         return
@@ -1892,7 +1892,12 @@ def front_load_tail_width_on_branch_tip_neighbor_carrier(cfg: TrainConfig) -> No
         return
     if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
         return
-    expected_tail_bonuses = (model_cfg.d_model * 15 // 2, model_cfg.d_model * 7, model_cfg.d_model * 13 // 2)
+    half_step = model_cfg.d_model // 2
+    expected_tail_bonuses = (
+        model_cfg.non_recurrent_mlp_hidden_bonus + half_step,
+        model_cfg.non_recurrent_mlp_hidden_bonus,
+        model_cfg.non_recurrent_mlp_hidden_bonus - half_step,
+    )
     if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
         return
     if model_cfg.q_low_rank != model_cfg.d_model // 4:
@@ -1944,10 +1949,17 @@ def front_load_tail_width_on_branch_tip_neighbor_carrier(cfg: TrainConfig) -> No
         return
     if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
         return
+    quarter_step = model_cfg.d_model // 8
+    model_cfg.final_tail_q_low_rank = None
+    model_cfg.tail_q_low_ranks = (
+        model_cfg.d_model // 8,
+        model_cfg.q_low_rank,
+        0,
+    )
     model_cfg.tail_mlp_hidden_bonuses = (
-        model_cfg.d_model * 8,
-        model_cfg.d_model * 7,
-        model_cfg.d_model * 6,
+        expected_tail_bonuses[0],
+        expected_tail_bonuses[1],
+        expected_tail_bonuses[2] + quarter_step,
     )
 
 
@@ -5009,7 +5021,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     keep_final_attention_out_proj_float_on_full_context_three_block_carrier(cfg)
     restore_short_to_full_context_on_branch_tip_three_block_carrier(cfg)
     add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg)
-    front_load_tail_width_on_branch_tip_neighbor_carrier(cfg)
+    fund_final_tail_mlp_from_first_tail_q_on_branch_tip_neighbor_carrier(cfg)
     reallocate_tail_q_budget_into_dual_rank64_early_width_on_branch_tip_carrier(cfg)
     reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg)
     return cfg
