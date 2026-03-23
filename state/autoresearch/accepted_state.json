@@ -1,13 +1,13 @@
 {
-  "accepted_artifact_bytes": 15721808,
-  "accepted_commit": "402345ded0380a62d7afff4345d5be0d8214ee41",
-  "accepted_commit_short": "402345d",
-  "accepted_results_path": "runs/autoresearch_5090/runs/ar5090-20260323-081800/results.json",
-  "accepted_run_id": "ar5090-20260323-081800",
-  "accepted_val_bpb": 1.5275820698419948,
+  "accepted_artifact_bytes": 15732516,
+  "accepted_commit": "bd5e987a00b69a9285e97534d376b5cad759e4d6",
+  "accepted_commit_short": "bd5e987",
+  "accepted_results_path": "runs/autoresearch_5090/runs/ar5090-20260323-074105/results.json",
+  "accepted_run_id": "ar5090-20260323-074105",
+  "accepted_val_bpb": 1.5254880853616,
   "current_branch": "aggressive-autoresearch/20260323-032524",
-  "current_commit": "402345ded0380a62d7afff4345d5be0d8214ee41",
-  "current_commit_short": "402345d",
+  "current_commit": "bd5e987a00b69a9285e97534d376b5cad759e4d6",
+  "current_commit_short": "bd5e987",
   "promoted_5090_config_path": "configs/promoted/autoresearch_5090_best.json",
   "promoted_h100_1x_config_path": "configs/promoted/autoresearch_h100_1x_best.json",
   "promoted_h100_8x_config_path": "configs/promoted/autoresearch_h100_8x_best.json",
@@ -48,6 +48,6 @@
       "fake_quant_start_step_and_clip_percentile"
     ]
   },
-  "source_config_path": "/workspace/autoresearch-parameter-golf/runs/autoresearch_5090/runs/ar5090-20260323-081800/config.json",
-  "updated_at_unix": 1774251109.498961
+  "source_config_path": "/workspace/autoresearch-parameter-golf/runs/autoresearch_5090/runs/ar5090-20260323-074105/config.json",
+  "updated_at_unix": 1774252102.0574813
 }
