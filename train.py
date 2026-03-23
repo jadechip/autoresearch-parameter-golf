@@ -161,6 +161,7 @@ class QuantConfig:
     keep_float_store_dtype: torch.dtype = torch.float16
     low_bit_name_patterns: tuple[str, ...] = ()
     low_bit_bits: int = 8
+    override_low_bit_name_bits: tuple[tuple[str, int], ...] = ()
     clip_percentile: float = 99.999
     zlib_level: int = 9
 
@@ -370,6 +371,11 @@ def train_config_from_dict(data: Mapping[str, Any]) -> TrainConfig:
             quant_payload["keep_float_name_patterns"] = tuple(quant_payload["keep_float_name_patterns"])
         if "low_bit_name_patterns" in quant_payload and isinstance(quant_payload["low_bit_name_patterns"], list):
             quant_payload["low_bit_name_patterns"] = tuple(quant_payload["low_bit_name_patterns"])
+        if "override_low_bit_name_bits" in quant_payload and isinstance(quant_payload["override_low_bit_name_bits"], list):
+            quant_payload["override_low_bit_name_bits"] = tuple(
+                (str(pattern), int(bits))
+                for pattern, bits in quant_payload["override_low_bit_name_bits"]
+            )
         cfg.quant = QuantConfig(**quant_payload)
     if isinstance(cfg.counted_code_paths, list):
         cfg.counted_code_paths = tuple(cfg.counted_code_paths)
@@ -2241,6 +2247,132 @@ def switch_branch_tip_neighbor_carrier_to_dense_late_qat_multi_soup_selection(cf
     cfg.post_quant_include_triple_soup = True
 
 
+def replace_dense_late_qat_neighbor_branch_tip_with_selective_int4_low_rank_q_carrier(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if not model_cfg.final_tail_neighbor_mixer or not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
+        return
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
+        return
+    expected_tail_bonuses = (
+        model_cfg.d_model * 8,
+        model_cfg.d_model * 7,
+        model_cfg.d_model * 6 + model_cfg.d_model // 8,
+    )
+    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
+        return
+    if model_cfg.q_low_rank != model_cfg.d_model // 4:
+        return
+    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank is not None:
+        return
+    if model_cfg.tail_q_low_ranks != (0, model_cfg.d_model // 4, model_cfg.d_model // 8):
+        return
+    if model_cfg.penultimate_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.shared_mlp_fake_quant_during_train is not None:
+        return
+    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != 1_024:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if cfg.grad_accum_steps != 2:
+        return
+    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
+        return
+    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    if tuple(cfg.quant.override_low_bit_name_bits):
+        return
+    expected_keep_float_patterns = (
+        "norm",
+        "scale",
+        "gain",
+        "adapter",
+        "lm_head",
+        "tok_emb.weight",
+        "tail.2.mlp.",
+        "tail.2.attn.q_proj.down_proj.weight",
+        "tail.2.attn.q_proj.up_proj.weight",
+        "tail.2.attn.out_proj.weight",
+    )
+    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if cfg.checkpoint_every != 20 or cfg.checkpoint_archive_limit != 2 or cfg.post_quant_candidate_limit != 2:
+        return
+    if not cfg.checkpoint_archive_warmdown_only:
+        return
+    if not cfg.select_post_quant_best_checkpoint or not cfg.post_quant_include_pairwise_soup or not cfg.post_quant_include_triple_soup:
+        return
+
+    model_cfg.shared_layers = 2
+    model_cfg.recurrence_loops = 1
+    model_cfg.tail_layers = 4
+    model_cfg.shared_mlp_hidden_bonus = model_cfg.d_model
+    model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 2
+    model_cfg.tail_mlp_hidden_bonuses = (
+        model_cfg.d_model * 2,
+        model_cfg.d_model * 5 // 2,
+        model_cfg.d_model * 3,
+        model_cfg.d_model * 4,
+    )
+    model_cfg.q_low_rank = model_cfg.d_model * 3 // 16
+    model_cfg.shared_q_low_rank = model_cfg.d_model // 8
+    model_cfg.final_tail_q_low_rank = None
+    model_cfg.tail_q_low_ranks = (
+        model_cfg.d_model // 8,
+        model_cfg.d_model * 3 // 16,
+        model_cfg.d_model // 4,
+        0,
+    )
+    model_cfg.fake_quant_start_step = cfg.train_seq_len_warmup_steps
+    cfg.train_batch_tokens = 46_080
+    cfg.val_batch_tokens = 46_080
+    cfg.checkpoint_every = 0
+    cfg.checkpoint_archive_limit = 0
+    cfg.checkpoint_archive_warmdown_only = False
+    cfg.post_quant_candidate_limit = 0
+    cfg.select_post_quant_best_checkpoint = False
+    cfg.post_quant_include_pairwise_soup = False
+    cfg.post_quant_include_triple_soup = False
+    cfg.quant.low_bit_bits = 6
+    cfg.quant.low_bit_name_patterns = ("mlp.fc.weight", "mlp.proj.weight")
+    cfg.quant.override_low_bit_name_bits = (
+        ("shared.1.mlp.", 4),
+        ("tail.0.mlp.", 4),
+        ("tail.1.mlp.", 4),
+    )
+    cfg.quant.keep_float_name_patterns = (
+        "norm",
+        "scale",
+        "gain",
+        "adapter",
+        "lm_head",
+        "tok_emb.weight",
+        "tail.3.mlp.",
+        "tail.3.attn.q_proj.weight",
+        "tail.3.attn.out_proj.weight",
+    )
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -3605,14 +3737,60 @@ def _keep_float_tensor(name: str, tensor: Tensor, cfg: QuantConfig, passthrough_
     return tensor
 
 
+def resolve_low_bit_bits_for_tensor(name: str, tensor: Tensor, cfg: QuantConfig) -> int:
+    if tensor.ndim < 2:
+        return 8
+    for pattern, bits in cfg.override_low_bit_name_bits:
+        if pattern in name:
+            return bits
+    if cfg.low_bit_bits < 8 and any(pattern in name for pattern in cfg.low_bit_name_patterns):
+        return cfg.low_bit_bits
+    return 8
+
+
 def quant_qmax_for_tensor(name: str, tensor: Tensor, cfg: QuantConfig) -> int:
-    if cfg.low_bit_bits < 8 and tensor.ndim >= 2 and any(pattern in name for pattern in cfg.low_bit_name_patterns):
-        return (1 << (cfg.low_bit_bits - 1)) - 1
+    bits = resolve_low_bit_bits_for_tensor(name, tensor, cfg)
+    if bits < 8:
+        return (1 << (bits - 1)) - 1
     return 127
 
 
-def quantize_float_tensor_export(name: str, tensor: Tensor, cfg: QuantConfig) -> tuple[Tensor, Tensor]:
+def pack_signed_int4_tensor(q: Tensor) -> Tensor:
+    if q.dtype != torch.int8:
+        raise ValueError("INT4 packing expects int8 inputs")
+    flat = q.reshape(-1).to(dtype=torch.int16)
+    shifted = flat + 7
+    if shifted.numel() == 0:
+        return torch.empty((0,), dtype=torch.uint8)
+    if int(shifted.min().item()) < 0 or int(shifted.max().item()) > 14:
+        raise ValueError("INT4 tensor values must be in [-7, 7]")
+    if shifted.numel() % 2:
+        shifted = torch.cat((shifted, torch.full((1,), 7, dtype=torch.int16)))
+    low = shifted[0::2].to(dtype=torch.uint8)
+    high = shifted[1::2].to(dtype=torch.uint8)
+    return (low | (high << 4)).contiguous()
+
+
+def unpack_signed_int4_tensor(packed: Tensor, shape: tuple[int, ...]) -> Tensor:
+    if packed.dtype != torch.uint8:
+        raise ValueError("packed INT4 tensors must be stored as uint8")
+    if not shape:
+        raise ValueError("packed INT4 tensors require a non-empty shape")
+    raw = packed.reshape(-1).to(dtype=torch.uint8)
+    if raw.numel() == 0:
+        return torch.empty(shape, dtype=torch.int8)
+    low = (raw & 0x0F).to(dtype=torch.int16)
+    high = ((raw >> 4) & 0x0F).to(dtype=torch.int16)
+    unpacked = torch.empty((raw.numel() * 2,), dtype=torch.int16)
+    unpacked[0::2] = low - 7
+    unpacked[1::2] = high - 7
+    needed = math.prod(shape)
+    return unpacked[:needed].reshape(shape).to(dtype=torch.int8).contiguous()
+
+
+def quantize_float_tensor_export(name: str, tensor: Tensor, cfg: QuantConfig) -> tuple[Tensor, Tensor, dict[str, Any] | None]:
     t32 = tensor.float()
+    bits = resolve_low_bit_bits_for_tensor(name, t32, cfg)
     qmax = quant_qmax_for_tensor(name, t32, cfg)
     q_level = cfg.clip_percentile / 100.0
     if t32.ndim == 2:
@@ -3621,12 +3799,16 @@ def quantize_float_tensor_export(name: str, tensor: Tensor, cfg: QuantConfig) ->
         clipped = torch.maximum(torch.minimum(t32, clip[:, None]), -clip[:, None])
         scale = (clip / qmax).clamp_min(1.0 / qmax)
         q = torch.clamp(torch.round(clipped / scale[:, None]), -qmax, qmax).to(torch.int8).contiguous()
-        return q, scale.to(dtype=cfg.scale_store_dtype).contiguous()
+        if bits == 4:
+            packed = pack_signed_int4_tensor(q)
+            meta = {"scheme": "per_row_packed_int4", "axis": 0, "shape": list(q.shape)}
+            return packed, scale.to(dtype=cfg.scale_store_dtype).contiguous(), meta
+        return q, scale.to(dtype=cfg.scale_store_dtype).contiguous(), {"scheme": "per_row", "axis": 0}
     clip_scalar = float(torch.quantile(t32.abs().flatten(), q_level).item()) if t32.numel() else 0.0
     clip_scalar = max(clip_scalar, 1.0 / qmax)
     scale = torch.tensor(clip_scalar / qmax, dtype=torch.float32)
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_scalar, clip_scalar) / scale), -qmax, qmax).to(torch.int8).contiguous()
-    return q, scale
+    return q, scale, None
 
 
 def quantize_state_dict_int8(state_dict: dict[str, Tensor], cfg: QuantConfig) -> tuple[dict[str, Any], dict[str, int]]:
@@ -3660,15 +3842,15 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor], cfg: QuantConfig) ->
             stats["quant_payload_bytes"] += tensor_nbytes(kept)
             continue
         stats["num_float_tensors"] += 1
-        q, scale = quantize_float_tensor_export(name, t, cfg)
+        q, scale, qmeta_entry = quantize_float_tensor_export(name, t, cfg)
         quantized[name] = q
         scales[name] = scale
         dtypes[name] = str(t.dtype).removeprefix("torch.")
-        if scale.ndim > 0:
-            qmeta[name] = {"scheme": "per_row", "axis": 0}
+        if qmeta_entry is not None:
+            qmeta[name] = qmeta_entry
         stats["quant_payload_bytes"] += tensor_nbytes(q) + tensor_nbytes(scale)
     payload: dict[str, Any] = {
-        "__quant_format__": "rowwise_int8_lora_recurrent_v1",
+        "__quant_format__": "rowwise_mixed_lowbit_lora_recurrent_v2",
         "quantized": quantized,
         "scales": scales,
         "dtypes": dtypes,
@@ -3688,7 +3870,15 @@ def dequantize_state_dict_int8(payload: Mapping[str, Any]) -> dict[str, Tensor]:
     for name, q in payload["quantized"].items():
         dtype = getattr(torch, payload["dtypes"][name])
         scale = payload["scales"][name]
-        if qmeta.get(name, {}).get("scheme") == "per_row" or scale.ndim > 0:
+        meta = qmeta.get(name, {})
+        if meta.get("scheme") == "per_row_packed_int4":
+            shape = tuple(int(dim) for dim in meta.get("shape", ()))
+            if not shape:
+                raise ValueError(f"packed INT4 tensor {name} is missing shape metadata")
+            unpacked = unpack_signed_int4_tensor(q, shape)
+            scale = scale.to(dtype=torch.float32)
+            out[name] = (unpacked.float() * scale.view(shape[0], *([1] * (len(shape) - 1)))).to(dtype=dtype).contiguous()
+        elif meta.get("scheme") == "per_row" or scale.ndim > 0:
             scale = scale.to(dtype=torch.float32)
             out[name] = (q.float() * scale.view(q.shape[0], *([1] * (q.ndim - 1)))).to(dtype=dtype).contiguous()
         else:
@@ -4751,6 +4941,11 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("quant.clip_percentile must be in (0, 100]")
     if cfg.quant.low_bit_bits < 2 or cfg.quant.low_bit_bits > 8:
         raise ConfigError("quant.low_bit_bits must be in [2, 8]")
+    for pattern, bits in cfg.quant.override_low_bit_name_bits:
+        if not pattern:
+            raise ConfigError("quant.override_low_bit_name_bits patterns must be non-empty")
+        if bits < 2 or bits > 8:
+            raise ConfigError("quant.override_low_bit_name_bits bits must be in [2, 8]")
     invalid_targets = sorted(set(cfg.model.adapter_targets) - set(ALLOWED_ADAPTER_TARGETS))
     if invalid_targets:
         raise ConfigError(f"invalid adapter_targets: {invalid_targets}")
@@ -5729,6 +5924,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     front_load_tail_width_on_branch_tip_neighbor_carrier(cfg)
     move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg)
     switch_branch_tip_neighbor_carrier_to_dense_late_qat_multi_soup_selection(cfg)
+    replace_dense_late_qat_neighbor_branch_tip_with_selective_int4_low_rank_q_carrier(cfg)
     reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg)
     return cfg
 
