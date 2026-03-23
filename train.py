@@ -109,6 +109,7 @@ class ModelConfig:
     tail_q_low_ranks: tuple[int, ...] | None = None
     final_tail_smear_gate: bool = False
     final_tail_neighbor_mixer: bool = False
+    exact_bigram_head: bool = False
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -2126,6 +2127,86 @@ def reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg: Tr
         "tail.3.attn.q_proj.weight",
         "tail.3.attn.out_proj.weight",
     )
+
+
+def replace_branch_tip_neighbor_with_exact_bigram_head(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if not model_cfg.final_tail_neighbor_mixer or model_cfg.final_tail_smear_gate or model_cfg.exact_bigram_head:
+        return
+    if not model_cfg.tie_embeddings:
+        return
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
+        return
+    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
+        return
+    expected_tail_bonuses = (
+        model_cfg.d_model * 8,
+        model_cfg.d_model * 7,
+        model_cfg.d_model * 49 // 8,
+    )
+    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
+        return
+    if model_cfg.q_low_rank != model_cfg.d_model // 4:
+        return
+    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank is not None:
+        return
+    if model_cfg.tail_q_low_ranks != (0, model_cfg.q_low_rank, model_cfg.d_model // 8):
+        return
+    if model_cfg.penultimate_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.shared_mlp_fake_quant_during_train is not None:
+        return
+    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if cfg.grad_accum_steps != 2:
+        return
+    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
+        return
+    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    expected_keep_float_patterns = (
+        "norm",
+        "scale",
+        "gain",
+        "adapter",
+        "lm_head",
+        "tok_emb.weight",
+        "tail.2.mlp.",
+        "tail.2.attn.q_proj.down_proj.weight",
+        "tail.2.attn.q_proj.up_proj.weight",
+        "tail.2.attn.out_proj.weight",
+    )
+    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    model_cfg.final_tail_neighbor_mixer = False
+    model_cfg.exact_bigram_head = True
+    model_cfg.tail_mlp_hidden_bonuses = (
+        expected_tail_bonuses[0],
+        expected_tail_bonuses[1],
+        expected_tail_bonuses[2] - model_cfg.d_model * 2,
+    )
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -3122,6 +3203,16 @@ class ReLU2MLP(nn.Module):
         return self.dropout(self.proj(x, slot=slot))
 
 
+class ExactBigramHead(nn.Module):
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.table = nn.Embedding(cfg.vocab_size, cfg.vocab_size)
+        nn.init.zeros_(self.table.weight)
+
+    def forward(self, input_ids: Tensor, dtype: torch.dtype) -> Tensor:
+        return self.table(input_ids).to(dtype=dtype)
+
+
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -3246,6 +3337,7 @@ class RecurrentGPT(nn.Module):
             ]
         )
         self.final_norm = RMSNorm(cfg.d_model)
+        self.exact_bigram_head = ExactBigramHead(cfg) if cfg.exact_bigram_head else None
         self.lm_head = None if cfg.tie_embeddings else FakeQuantLinear(
             cfg.d_model,
             cfg.vocab_size,
@@ -3286,6 +3378,8 @@ class RecurrentGPT(nn.Module):
             if self.lm_head is None:
                 raise RuntimeError("lm_head missing while tie_embeddings=False")
             logits = self.lm_head(x)
+        if self.exact_bigram_head is not None:
+            logits = logits + self.exact_bigram_head(input_ids, logits.dtype)
         logits = self.cfg.logit_softcap * torch.tanh(logits / self.cfg.logit_softcap)
         loss = None
         if target_ids is not None:
@@ -4115,6 +4209,8 @@ def validate_config(cfg: TrainConfig) -> None:
                 raise ConfigError("tail_q_low_ranks entries must be smaller than d_model")
     if cfg.model.final_tail_smear_gate and cfg.model.final_tail_neighbor_mixer:
         raise ConfigError("final_tail_smear_gate and final_tail_neighbor_mixer cannot both be enabled")
+    if cfg.model.exact_bigram_head and (cfg.model.final_tail_smear_gate or cfg.model.final_tail_neighbor_mixer):
+        raise ConfigError("exact_bigram_head cannot be combined with final-tail local mixers")
     if cfg.model.penultimate_tail_mlp_fake_quant_during_train is not None and cfg.model.tail_layers < 2:
         raise ConfigError("penultimate_tail_mlp_fake_quant_during_train requires at least 2 tail layers")
     if cfg.grad_accum_steps <= 0:
@@ -5024,6 +5120,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg)
     front_load_tail_width_on_branch_tip_neighbor_carrier(cfg)
     move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg)
+    replace_branch_tip_neighbor_with_exact_bigram_head(cfg)
     reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg)
     return cfg
 
