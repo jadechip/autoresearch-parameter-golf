@@ -216,3 +216,15 @@ Treat the search as a story board, not as free-form mutation roulette:
 - If recent history is narrow, switch stories before refining.
 - If a story requires a missing self-contained module in `train.py`, implement the module instead of downgrading the story to a precision micro-tune.
 - Keep module-writing stories isolated so the result is interpretable and easy to revert.
+
+## Hot Steering Override
+For the next search block, prioritize macro-topology diversity over local precision refinements.
+
+Required macro axes:
+- shared_layers vs recurrence_loops
+- tail_layers
+- d_model
+- seq_len / curriculum
+- local-module family
+
+Do not spend more than two additional runs inside the same outer carrier topology without changing one of the axes above.
