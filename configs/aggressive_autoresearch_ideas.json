@@ -1,0 +1,110 @@
+{
+  "schema_version": "pgolf.aggressive_ideas.v1",
+  "description": "High-aggression architecture campaign ideas for the separate Codex autoresearch loop.",
+  "tries_per_idea_default": 6,
+  "ideas": [
+    {
+      "id": "xsa_neural_cache",
+      "title": "XSA + Neural Cache",
+      "branch_family": "xsa_or_cache",
+      "kind": "module_writing",
+      "goal": "Implement a self-contained XSA or top-layer cross-window KV cache branch that preserves causal scoring and stays submission-plausible.",
+      "hints": [
+        "Prefer top-layer cache before whole-model cache.",
+        "Prefer an isolated XSA or cache branch over a blended first attempt.",
+        "Do not turn the first six attempts into a full eval-harness rewrite."
+      ]
+    },
+    {
+      "id": "late_selective_quantization",
+      "title": "Late Selective Compression-Aware Quantization",
+      "branch_family": "selective_precision_or_quantization",
+      "kind": "existing_surface",
+      "goal": "Explore coarse tensor-group quantization schedules and selective higher precision without drifting into fine-grained mixed-bit complexity.",
+      "hints": [
+        "Use coarse groups such as embeddings or head, early attention, late attention, middle MLPs, and final MLPs.",
+        "Prefer later fake quant or post-quant selection over blanket early QAT.",
+        "Avoid per-row heterogeneous bit allocation in the first six attempts."
+      ]
+    },
+    {
+      "id": "low_rank_q_reallocation",
+      "title": "Low-Rank Q Structural Reallocation",
+      "branch_family": "low_rank_q_reallocation",
+      "kind": "existing_surface",
+      "goal": "Use factored or low-rank Q to fund stronger carrier changes such as more unique depth, better local modules, or more steps.",
+      "hints": [
+        "Do not stop at low-rank Q alone if a stronger reallocation is feasible.",
+        "Prefer using the savings for depth or module quality rather than tiny local tweaks."
+      ]
+    },
+    {
+      "id": "split_local_context_families",
+      "title": "Split Local-Context Families",
+      "branch_family": "smeargate_or_ttt",
+      "kind": "module_writing",
+      "goal": "Keep XSA-family and SmearGate or TTT-family ideas separate instead of stacking them prematurely.",
+      "hints": [
+        "Family A: XSA + EMA + partial RoPE + late QAT, no TTT.",
+        "Family B: SmearGate + smarter bigram + mixed low-bit quant + meta-TTT or causal TTT, no XSA.",
+        "Do not blur the families unless earlier evidence makes the interaction worth testing."
+      ]
+    },
+    {
+      "id": "compute_aware_context_curriculum",
+      "title": "Compute-Aware Context Curriculum",
+      "branch_family": "batch_or_context_curriculum",
+      "kind": "existing_surface",
+      "goal": "Use shorter context early and longer context later, reclaiming compute with carrier or batch changes instead of brute force.",
+      "hints": [
+        "Prefer 1024 or 1536 to 2048 curricula over jumping directly to very long context.",
+        "Use batch shrink or structural savings to pay for longer context."
+      ]
+    },
+    {
+      "id": "smarter_local_token_module",
+      "title": "Smarter Local-Token Module",
+      "branch_family": "local_token_module",
+      "kind": "module_writing",
+      "goal": "Replace crude BigramHash scaling with a better byte-quality local-token module.",
+      "hints": [
+        "Good candidates include top-N exact bigram plus hashed tail, two-scale local features, or a factorized bigram projection.",
+        "Keep the implementation compact and submission-plausible."
+      ]
+    },
+    {
+      "id": "quant_optimized_checkpoint_soup",
+      "title": "Quantization-Optimized Checkpoint Soup",
+      "branch_family": "checkpoint_soup_or_ptq",
+      "kind": "existing_surface",
+      "goal": "Select or average checkpoints based on post-quant quality rather than best float loss.",
+      "hints": [
+        "A viable branch is no QAT, denser warmdown checkpoints, post-quant selection, and selective soup.",
+        "Keep the first attempts simple and structured-output-safe."
+      ]
+    },
+    {
+      "id": "localized_canon_inserts",
+      "title": "Localized Canon Inserts",
+      "branch_family": "canon_or_neighbor_mixer",
+      "kind": "module_writing",
+      "goal": "Try one or two localized Canon-style neighbor-mixing inserts instead of a full Canon pivot.",
+      "hints": [
+        "Prefer lower-stack or pre-final-XSA placements.",
+        "Keep the change local and interpretable."
+      ]
+    },
+    {
+      "id": "selective_int4_mlp",
+      "title": "Selective INT4 MLP Moonshot",
+      "branch_family": "selective_precision_or_quantization",
+      "kind": "existing_surface",
+      "goal": "Probe selective INT4 on less-sensitive middle MLPs while keeping boundary and final MLPs safer.",
+      "hints": [
+        "Treat this as a late high-risk branch.",
+        "Do not do blanket INT4 everywhere.",
+        "Prefer selective middle-layer MLP targets only."
+      ]
+    }
+  ]
+}
