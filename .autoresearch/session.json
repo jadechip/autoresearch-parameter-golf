@@ -12,12 +12,12 @@
   "created_at_unix": 1774089643.238404,
   "current_branch": "aggressive-autoresearch/20260323-083105",
   "current_experiment": null,
-  "latest_artifact_bytes": 15334298,
+  "latest_artifact_bytes": 15752024,
   "latest_decision": "reverted",
-  "latest_results_path": "/workspace/autoresearch-parameter-golf/runs/autoresearch_5090/runs/ar5090-20260323-095044/results.json",
-  "latest_run_id": "ar5090-20260323-095044",
+  "latest_results_path": "/workspace/autoresearch-parameter-golf/runs/autoresearch_5090/runs/ar5090-20260323-100724/results.json",
+  "latest_run_id": "ar5090-20260323-100724",
   "latest_status": "success",
-  "latest_val_bpb": 1.528579780309855,
+  "latest_val_bpb": 1.5398915807983933,
   "repo_root": "/workspace/autoresearch-parameter-golf",
   "schema_version": "pgolf.autoresearch_session.v1",
   "search_policy": {
@@ -58,5 +58,5 @@
   },
   "state_dir": "/workspace/autoresearch-parameter-golf/.autoresearch",
   "status": "ready",
-  "updated_at_unix": 1774259922.9412682
+  "updated_at_unix": 1774260881.4368758
 }
