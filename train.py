@@ -109,8 +109,6 @@ class ModelConfig:
     tail_q_low_ranks: tuple[int, ...] | None = None
     final_tail_smear_gate: bool = False
     final_tail_neighbor_mixer: bool = False
-    token_history_rank: int = 0
-    token_history_tail_index: int = -1
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -2128,87 +2126,6 @@ def reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg: Tr
         "tail.3.attn.q_proj.weight",
         "tail.3.attn.out_proj.weight",
     )
-
-
-def replace_branch_tip_neighbor_with_final_two_scale_token_history(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if not model_cfg.final_tail_neighbor_mixer or model_cfg.final_tail_smear_gate or model_cfg.token_history_rank > 0:
-        return
-    if not model_cfg.tie_embeddings:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
-        return
-    expected_tail_bonuses = (
-        model_cfg.d_model * 8,
-        model_cfg.d_model * 7,
-        model_cfg.d_model * 49 // 8,
-    )
-    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank is not None:
-        return
-    if model_cfg.tail_q_low_ranks != (0, model_cfg.q_low_rank, model_cfg.d_model // 8):
-        return
-    if model_cfg.penultimate_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.2.mlp.",
-        "tail.2.attn.q_proj.down_proj.weight",
-        "tail.2.attn.q_proj.up_proj.weight",
-        "tail.2.attn.out_proj.weight",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    model_cfg.final_tail_neighbor_mixer = False
-    model_cfg.token_history_rank = model_cfg.d_model * 3 // 16
-    model_cfg.token_history_tail_index = model_cfg.tail_layers - 1
-    model_cfg.tail_mlp_hidden_bonuses = (
-        expected_tail_bonuses[0],
-        expected_tail_bonuses[1],
-        expected_tail_bonuses[2] - model_cfg.d_model // 2,
-    )
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -3205,53 +3122,6 @@ class ReLU2MLP(nn.Module):
         return self.dropout(self.proj(x, slot=slot))
 
 
-class TwoScaleTokenHistory(nn.Module):
-    def __init__(self, cfg: ModelConfig, *, rank: int):
-        super().__init__()
-        if rank <= 0:
-            raise ValueError("rank must be positive")
-        hash_rank = max(16, rank // 3)
-        self.d_model = cfg.d_model
-        self.num_buckets = max(cfg.vocab_size * 2, 2048)
-        self.exact_table = nn.Embedding(cfg.vocab_size, rank)
-        self.exact_proj = FakeQuantLinear(
-            rank,
-            cfg.d_model,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-            zero_init=True,
-        )
-        self.hash_table = nn.Embedding(self.num_buckets, hash_rank)
-        self.hash_proj = FakeQuantLinear(
-            hash_rank,
-            cfg.d_model,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-            zero_init=True,
-        )
-        nn.init.normal_(self.exact_table.weight, mean=0.0, std=cfg.emb_init_std)
-        nn.init.normal_(self.hash_table.weight, mean=0.0, std=cfg.emb_init_std)
-
-    def set_global_step(self, step: int) -> None:
-        self.exact_proj.set_global_step(step)
-        self.hash_proj.set_global_step(step)
-
-    def forward(self, input_ids: Tensor, dtype: torch.dtype) -> Tensor:
-        batch, seqlen = input_ids.shape
-        if seqlen <= 1:
-            return torch.zeros(batch, seqlen, self.d_model, device=input_ids.device, dtype=dtype)
-        prev = torch.cat((torch.zeros_like(input_ids[:, :1]), input_ids[:, :-1]), dim=1)
-        exact = self.exact_proj(self.exact_table(prev)).to(dtype=dtype)
-        pair_hash = input_ids.to(dtype=torch.int64) * 1_315_423_911 + prev.to(dtype=torch.int64) * 2_654_435_761
-        bucket_ids = torch.remainder(pair_hash, self.num_buckets).to(dtype=torch.long)
-        correction = self.hash_proj(self.hash_table(bucket_ids)).to(dtype=dtype)
-        exact[:, :1] = 0
-        correction[:, :1] = 0
-        return exact + correction
-
-
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -3262,7 +3132,6 @@ class TransformerBlock(nn.Module):
         mlp_fake_quant_during_train: bool | None = None,
         smear_gate: bool = False,
         neighbor_mixer: bool = False,
-        token_history_rank: int = 0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
@@ -3278,16 +3147,12 @@ class TransformerBlock(nn.Module):
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
         self.smear_scale = nn.Parameter(torch.zeros(scale_shape)) if smear_gate else None
-        self.token_history = TwoScaleTokenHistory(cfg, rank=token_history_rank) if token_history_rank > 0 else None
-        self.token_history_scale = nn.Parameter(torch.ones(scale_shape)) if token_history_rank > 0 else None
         self.neighbor_norm = RMSNorm(cfg.d_model) if neighbor_mixer else None
         self.neighbor_scale = nn.Parameter(torch.zeros(scale_shape)) if neighbor_mixer else None
 
     def set_global_step(self, step: int) -> None:
         self.attn.set_global_step(step)
         self.mlp.set_global_step(step)
-        if self.token_history is not None:
-            self.token_history.set_global_step(step)
 
     def residual_scale(self, scale: nn.Parameter, x: Tensor, slot: int | None) -> Tensor:
         if scale.ndim == 2:
@@ -3310,16 +3175,11 @@ class TransformerBlock(nn.Module):
             return torch.zeros_like(x)
         return torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
 
-    def forward(self, x: Tensor, input_ids: Tensor | None = None, slot: int | None = None) -> Tensor:
+    def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
         x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         if self.smear_scale is not None:
             x = x + self.causal_smear(x) * self.residual_scale(self.smear_scale, x, slot)
-        if self.token_history_scale is not None:
-            if input_ids is None:
-                raise RuntimeError("token history requires input_ids")
-            assert self.token_history is not None
-            x = x + self.token_history(input_ids, x.dtype) * self.residual_scale(self.token_history_scale, x, slot)
         if self.neighbor_scale is not None:
             assert self.neighbor_norm is not None
             x = x + self.causal_neighbor(self.neighbor_norm(x)) * self.residual_scale(self.neighbor_scale, x, slot)
@@ -3342,8 +3202,6 @@ class RecurrentGPT(nn.Module):
         tail_q_low_ranks = cfg.tail_q_low_ranks
         if tail_q_low_ranks is not None and len(tail_q_low_ranks) != cfg.tail_layers:
             raise ConfigError("tail_q_low_ranks must have exactly one entry per tail layer")
-        if cfg.token_history_rank > 0 and not (0 <= cfg.token_history_tail_index < cfg.tail_layers):
-            raise ConfigError("token_history_tail_index must point at a valid tail layer when token_history_rank > 0")
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
         self.stem = nn.ModuleList(
@@ -3383,7 +3241,6 @@ class RecurrentGPT(nn.Module):
                     ),
                     smear_gate=cfg.final_tail_smear_gate and tail_idx == cfg.tail_layers - 1,
                     neighbor_mixer=cfg.final_tail_neighbor_mixer and tail_idx == cfg.tail_layers - 1,
-                    token_history_rank=cfg.token_history_rank if tail_idx == cfg.token_history_tail_index else 0,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -3416,12 +3273,12 @@ class RecurrentGPT(nn.Module):
     def forward(self, input_ids: Tensor, target_ids: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
         x = self.emb_norm(self.tok_emb(input_ids))
         for block in self.stem:
-            x = block(x, input_ids=input_ids, slot=None)
+            x = block(x, slot=None)
         for loop_idx in range(self.cfg.recurrence_loops):
             for block in self.shared:
-                x = block(x, input_ids=input_ids, slot=loop_idx)
+                x = block(x, slot=loop_idx)
         for block in self.tail:
-            x = block(x, input_ids=input_ids, slot=None)
+            x = block(x, slot=None)
         x = self.final_norm(x)
         if self.cfg.tie_embeddings:
             logits = F.linear(x, self.tok_emb.weight)
@@ -4256,18 +4113,8 @@ def validate_config(cfg: TrainConfig) -> None:
                 raise ConfigError("tail_q_low_ranks entries must be >= 0")
             if rank >= cfg.model.d_model:
                 raise ConfigError("tail_q_low_ranks entries must be smaller than d_model")
-    if cfg.model.token_history_rank < 0:
-        raise ConfigError("token_history_rank must be >= 0")
-    if cfg.model.token_history_rank >= cfg.model.d_model:
-        raise ConfigError("token_history_rank must be smaller than d_model")
-    if cfg.model.token_history_rank > 0 and not (0 <= cfg.model.token_history_tail_index < cfg.model.tail_layers):
-        raise ConfigError("token_history_tail_index must be within tail layers when token_history_rank > 0")
-    if cfg.model.token_history_rank == 0 and cfg.model.token_history_tail_index != -1:
-        raise ConfigError("token_history_tail_index must be -1 when token_history_rank is 0")
     if cfg.model.final_tail_smear_gate and cfg.model.final_tail_neighbor_mixer:
         raise ConfigError("final_tail_smear_gate and final_tail_neighbor_mixer cannot both be enabled")
-    if cfg.model.token_history_rank > 0 and (cfg.model.final_tail_smear_gate or cfg.model.final_tail_neighbor_mixer):
-        raise ConfigError("token_history_rank cannot be combined with final-tail local mixers")
     if cfg.model.penultimate_tail_mlp_fake_quant_during_train is not None and cfg.model.tail_layers < 2:
         raise ConfigError("penultimate_tail_mlp_fake_quant_during_train requires at least 2 tail layers")
     if cfg.grad_accum_steps <= 0:
@@ -5177,7 +5024,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg)
     front_load_tail_width_on_branch_tip_neighbor_carrier(cfg)
     move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg)
-    replace_branch_tip_neighbor_with_final_two_scale_token_history(cfg)
     reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg)
     return cfg
 
