@@ -2231,59 +2231,14 @@ def switch_branch_tip_neighbor_carrier_to_dense_late_qat_multi_soup_selection(cf
         return
     if cfg.select_post_quant_best_checkpoint or cfg.post_quant_include_pairwise_soup or cfg.post_quant_include_triple_soup:
         return
-    # Blueprint F: replace the branch-tip carrier with a deeper PTQ-first soup branch.
-    model_cfg.final_tail_neighbor_mixer = False
-    model_cfg.fake_quant_during_train = False
-    model_cfg.attn_fake_quant_during_train = None
-    model_cfg.shared_mlp_fake_quant_during_train = None
-    model_cfg.penultimate_tail_mlp_fake_quant_during_train = None
-    model_cfg.final_tail_mlp_fake_quant_during_train = None
-    model_cfg.shared_layers = 1
-    model_cfg.recurrence_loops = 4
-    model_cfg.tail_layers = 7
-    model_cfg.shared_mlp_hidden_bonus = model_cfg.d_model
-    model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 2
-    model_cfg.tail_mlp_hidden_bonuses = (
-        model_cfg.d_model * 5 // 2,
-        model_cfg.d_model * 5 // 2,
-        model_cfg.d_model * 9 // 4,
-        model_cfg.d_model * 9 // 4,
-        model_cfg.d_model * 2,
-        model_cfg.d_model * 7 // 4,
-        model_cfg.d_model * 3 // 2,
-    )
-    model_cfg.q_low_rank = model_cfg.d_model // 8
-    model_cfg.shared_q_low_rank = model_cfg.d_model // 8
-    model_cfg.final_tail_q_low_rank = None
-    model_cfg.tail_q_low_ranks = (
-        model_cfg.d_model // 8,
-        model_cfg.d_model // 8,
-        model_cfg.d_model // 8,
-        model_cfg.d_model // 8,
-        model_cfg.d_model // 8,
-        model_cfg.d_model // 8,
-        0,
-    )
-    cfg.train_batch_tokens = 30_720
-    cfg.val_batch_tokens = 30_720
-    cfg.checkpoint_every = 8
-    cfg.checkpoint_archive_limit = 4
-    cfg.checkpoint_archive_warmdown_only = False
-    cfg.post_quant_candidate_limit = 4
+    model_cfg.fake_quant_start_step = 1_024
+    cfg.checkpoint_every = 20
+    cfg.checkpoint_archive_limit = 2
+    cfg.checkpoint_archive_warmdown_only = True
+    cfg.post_quant_candidate_limit = 2
     cfg.select_post_quant_best_checkpoint = True
     cfg.post_quant_include_pairwise_soup = True
     cfg.post_quant_include_triple_soup = True
-    cfg.quant.keep_float_name_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.6.mlp.",
-        "tail.6.attn.q_proj.weight",
-        "tail.6.attn.out_proj.weight",
-    )
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
