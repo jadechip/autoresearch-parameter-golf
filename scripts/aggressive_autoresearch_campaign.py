@@ -28,6 +28,44 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def hydrate_campaign_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    ideas_json_value = payload.get("ideas_json")
+    if not ideas_json_value:
+        return payload
+    ideas_json_path = Path(str(ideas_json_value))
+    if not ideas_json_path.is_absolute():
+        ideas_json_path = repo_root() / ideas_json_path
+    if not ideas_json_path.is_file():
+        return payload
+
+    source = load_json(ideas_json_path)
+    source_ideas = {
+        str(item["id"]): item
+        for item in source.get("ideas", [])
+        if isinstance(item, dict) and item.get("id") is not None
+    }
+    changed = False
+    for idea in payload.get("ideas", []):
+        source_idea = source_ideas.get(str(idea.get("id")))
+        if source_idea is None:
+            continue
+        desired_attempt_mode = str(source_idea.get("attempt_mode", "independent_architecture_variants"))
+        desired_axes = [str(item) for item in source_idea.get("must_change_axes", [])]
+        desired_forbidden = [str(item) for item in source_idea.get("forbidden_refinements", [])]
+        if idea.get("attempt_mode") != desired_attempt_mode:
+            idea["attempt_mode"] = desired_attempt_mode
+            changed = True
+        if idea.get("must_change_axes") != desired_axes:
+            idea["must_change_axes"] = desired_axes
+            changed = True
+        if idea.get("forbidden_refinements") != desired_forbidden:
+            idea["forbidden_refinements"] = desired_forbidden
+            changed = True
+    if changed:
+        payload["updated_at_unix"] = time.time()
+    return payload
+
+
 def write_campaign(state_dir: Path, payload: dict[str, Any]) -> Path:
     payload = dict(payload)
     payload["schema_version"] = CAMPAIGN_SCHEMA_VERSION
@@ -42,6 +80,7 @@ def load_campaign(state_dir: Path) -> dict[str, Any]:
     payload = load_json(path)
     if payload.get("schema_version") != CAMPAIGN_SCHEMA_VERSION:
         raise ValueError(f"unexpected aggressive campaign schema: {payload.get('schema_version')}")
+    payload = hydrate_campaign_metadata(payload)
     return payload
 
 
@@ -51,8 +90,11 @@ def normalize_idea(raw: dict[str, Any], attempts_allowed: int) -> dict[str, Any]
         "title": str(raw["title"]),
         "branch_family": str(raw.get("branch_family", "other")),
         "kind": str(raw.get("kind", "existing_surface")),
+        "attempt_mode": str(raw.get("attempt_mode", "independent_architecture_variants")),
         "goal": str(raw.get("goal", "")),
         "hints": [str(item) for item in raw.get("hints", [])],
+        "must_change_axes": [str(item) for item in raw.get("must_change_axes", [])],
+        "forbidden_refinements": [str(item) for item in raw.get("forbidden_refinements", [])],
         "status": "pending",
         "attempts_allowed": int(raw.get("attempts_allowed", attempts_allowed)),
         "attempts_used": 0,
