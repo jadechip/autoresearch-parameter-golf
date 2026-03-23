@@ -4392,7 +4392,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     flatten_near_cap_carrier_into_four_unique_blocks(cfg)
     trade_one_four_block_layer_for_three_wider_unique_blocks(cfg)
     front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg)
-    replace_final_tail_attention_with_local_xsa_cache_on_three_block_carrier(cfg)
+    add_cross_window_summary_xsa_on_three_block_carrier(cfg)
     return cfg
 
 
