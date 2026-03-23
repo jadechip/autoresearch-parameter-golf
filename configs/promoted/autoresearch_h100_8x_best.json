@@ -42,6 +42,7 @@
     "non_recurrent_mlp_hidden_bonus": 3584,
     "num_heads": 8,
     "num_kv_heads": 4,
+    "penultimate_tail_mlp_fake_quant_during_train": false,
     "q_low_rank": 128,
     "qk_gain_init": 1.0,
     "recurrence_loops": 0,
@@ -90,7 +91,8 @@
       "lm_head",
       "tok_emb.weight",
       "tail.2.mlp.",
-      "tail.2.attn.q_proj.weight"
+      "tail.2.attn.q_proj.weight",
+      "tail.2.attn.out_proj.weight"
     ],
     "keep_float_store_dtype": "torch.float16",
     "low_bit_bits": 6,
