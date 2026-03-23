@@ -106,7 +106,6 @@ class ModelConfig:
     q_low_rank: int = 0
     shared_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
-    tail_q_low_ranks: tuple[int, ...] | None = None
     final_tail_smear_gate: bool = False
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
@@ -323,8 +322,6 @@ def train_config_from_dict(data: Mapping[str, Any]) -> TrainConfig:
             model_payload["adapter_targets"] = tuple(model_payload["adapter_targets"])
         if "tail_mlp_hidden_bonuses" in model_payload and isinstance(model_payload["tail_mlp_hidden_bonuses"], list):
             model_payload["tail_mlp_hidden_bonuses"] = tuple(model_payload["tail_mlp_hidden_bonuses"])
-        if "tail_q_low_ranks" in model_payload and isinstance(model_payload["tail_q_low_ranks"], list):
-            model_payload["tail_q_low_ranks"] = tuple(model_payload["tail_q_low_ranks"])
         cfg.model = ModelConfig(**model_payload)
     if "optim" in payload:
         cfg.optim = OptimConfig(**dict(payload["optim"]))
@@ -1676,7 +1673,7 @@ def disable_penultimate_tail_mlp_fake_quant_on_full_context_three_block_carrier(
         return
     model_cfg.penultimate_tail_mlp_fake_quant_during_train = False
 
-def shift_full_context_tail_q_budget_later_on_three_block_carrier(cfg: TrainConfig) -> None:
+def keep_final_attention_out_proj_float_on_full_context_three_block_carrier(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
         return
@@ -1697,8 +1694,6 @@ def shift_full_context_tail_q_budget_later_on_three_block_carrier(cfg: TrainConf
     if model_cfg.q_low_rank != model_cfg.d_model // 4:
         return
     if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank != 0:
-        return
-    if model_cfg.tail_q_low_ranks is not None:
         return
     if model_cfg.penultimate_tail_mlp_fake_quant_during_train is not False:
         return
@@ -1745,8 +1740,8 @@ def shift_full_context_tail_q_budget_later_on_three_block_carrier(cfg: TrainConf
     cfg.quant.keep_float_name_patterns = tuple(
         dict.fromkeys((*cfg.quant.keep_float_name_patterns, "tail.2.attn.out_proj.weight"))
     )
-    model_cfg.final_tail_q_low_rank = None
-    model_cfg.tail_q_low_ranks = (model_cfg.d_model * 3 // 16, model_cfg.d_model * 5 // 16, 0)
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2801,9 +2796,6 @@ class RecurrentGPT(nn.Module):
         super().__init__()
         self.cfg = cfg
         final_tail_q_low_rank = cfg.q_low_rank if cfg.final_tail_q_low_rank is None else cfg.final_tail_q_low_rank
-        tail_q_low_ranks = cfg.tail_q_low_ranks
-        if tail_q_low_ranks is not None and len(tail_q_low_ranks) != cfg.tail_layers:
-            raise ConfigError("tail_q_low_ranks must have exactly one entry per tail layer")
         non_recurrent_hidden_bonus = (
             cfg.non_recurrent_mlp_hidden_bonus
             if cfg.non_recurrent_mlp_hidden_bonus is not None
@@ -2837,11 +2829,7 @@ class RecurrentGPT(nn.Module):
                     mlp_hidden_bonus=(
                         tail_hidden_bonuses[tail_idx] if tail_hidden_bonuses is not None else non_recurrent_hidden_bonus
                     ),
-                    q_low_rank=(
-                        tail_q_low_ranks[tail_idx]
-                        if tail_q_low_ranks is not None
-                        else (final_tail_q_low_rank if tail_idx == cfg.tail_layers - 1 else None)
-                    ),
+                    q_low_rank=final_tail_q_low_rank if tail_idx == cfg.tail_layers - 1 else None,
                     mlp_fake_quant_during_train=(
                         cfg.final_tail_mlp_fake_quant_during_train
                         if tail_idx == cfg.tail_layers - 1
@@ -3343,8 +3331,6 @@ def load_model_from_artifact(path: str | Path, device: torch.device) -> tuple[Re
         model_payload["adapter_targets"] = tuple(model_payload["adapter_targets"])
     if "tail_mlp_hidden_bonuses" in model_payload and isinstance(model_payload["tail_mlp_hidden_bonuses"], list):
         model_payload["tail_mlp_hidden_bonuses"] = tuple(model_payload["tail_mlp_hidden_bonuses"])
-    if "tail_q_low_ranks" in model_payload and isinstance(model_payload["tail_q_low_ranks"], list):
-        model_payload["tail_q_low_ranks"] = tuple(model_payload["tail_q_low_ranks"])
     model = RecurrentGPT(ModelConfig(**model_payload)).to(device)
     payload = unpack_quantized_payload(blob)
     state_dict = dequantize_state_dict_int8(payload)
@@ -3714,16 +3700,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
-    if cfg.model.tail_q_low_ranks is not None:
-        if cfg.model.final_tail_q_low_rank is not None:
-            raise ConfigError("tail_q_low_ranks cannot be combined with final_tail_q_low_rank")
-        if len(cfg.model.tail_q_low_ranks) != cfg.model.tail_layers:
-            raise ConfigError("tail_q_low_ranks must have exactly one entry per tail layer")
-        for rank in cfg.model.tail_q_low_ranks:
-            if rank < 0:
-                raise ConfigError("tail_q_low_ranks entries must be >= 0")
-            if rank >= cfg.model.d_model:
-                raise ConfigError("tail_q_low_ranks entries must be smaller than d_model")
     if cfg.model.penultimate_tail_mlp_fake_quant_during_train is not None and cfg.model.tail_layers < 2:
         raise ConfigError("penultimate_tail_mlp_fake_quant_during_train requires at least 2 tail layers")
     if cfg.grad_accum_steps <= 0:
@@ -4628,7 +4604,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg)
     start_full_context_and_shrink_batch_on_three_block_near_cap_carrier(cfg)
     disable_penultimate_tail_mlp_fake_quant_on_full_context_three_block_carrier(cfg)
-    shift_full_context_tail_q_budget_later_on_three_block_carrier(cfg)
+    keep_final_attention_out_proj_float_on_full_context_three_block_carrier(cfg)
     return cfg
 
 
