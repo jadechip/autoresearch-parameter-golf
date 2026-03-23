@@ -1540,7 +1540,7 @@ def front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg: TrainConfig) 
         model_cfg.non_recurrent_mlp_hidden_bonus,
         model_cfg.non_recurrent_mlp_hidden_bonus - half_step,
     )
-def reallocate_front_loaded_three_block_carrier_into_four_block_near_cap_line(cfg: TrainConfig) -> None:
+def start_full_context_and_shrink_batch_on_three_block_near_cap_carrier(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
         return
@@ -1602,24 +1602,8 @@ def reallocate_front_loaded_three_block_carrier_into_four_block_near_cap_line(cf
         return
     if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
         return
-    model_cfg.tail_layers = 4
-    model_cfg.non_recurrent_mlp_hidden_bonus = model_cfg.d_model * 5
-    model_cfg.tail_mlp_hidden_bonuses = (
-        model_cfg.d_model * 6,
-        model_cfg.d_model * 11 // 2,
-        model_cfg.d_model * 5,
-        model_cfg.d_model * 9 // 2,
-    )
-    cfg.quant.keep_float_name_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.3.mlp.",
-        "tail.3.attn.q_proj.weight",
-    )
+    cfg.train_batch_tokens = 49_152
+    cfg.train_seq_len_min = model_cfg.seq_len
 
 
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -4474,7 +4458,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     flatten_near_cap_carrier_into_four_unique_blocks(cfg)
     trade_one_four_block_layer_for_three_wider_unique_blocks(cfg)
     front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg)
-    reallocate_front_loaded_three_block_carrier_into_four_block_near_cap_line(cfg)
+    start_full_context_and_shrink_batch_on_three_block_near_cap_carrier(cfg)
     return cfg
 
 
