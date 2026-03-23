@@ -3054,7 +3054,6 @@ class TransformerBlock(nn.Module):
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
         self.smear_scale = nn.Parameter(torch.zeros(scale_shape)) if smear_gate else None
-        self.neighbor_norm = RMSNorm(cfg.d_model) if neighbor_mixer else None
         self.neighbor_scale = nn.Parameter(torch.zeros(scale_shape)) if neighbor_mixer else None
 
     def set_global_step(self, step: int) -> None:
@@ -3083,13 +3082,14 @@ class TransformerBlock(nn.Module):
         return torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
-        x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
-        x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
+        attn_input = self.attn_norm(x)
+        x = x + self.attn(attn_input, slot=slot) * self.residual_scale(self.attn_scale, x, slot)
+        mlp_input = self.mlp_norm(x)
+        x = x + self.mlp(mlp_input, slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         if self.smear_scale is not None:
             x = x + self.causal_smear(x) * self.residual_scale(self.smear_scale, x, slot)
         if self.neighbor_scale is not None:
-            assert self.neighbor_norm is not None
-            x = x + self.causal_neighbor(self.neighbor_norm(x)) * self.residual_scale(self.neighbor_scale, x, slot)
+            x = x + self.causal_neighbor(mlp_input) * self.residual_scale(self.neighbor_scale, x, slot)
         return x
 
 
