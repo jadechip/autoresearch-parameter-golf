@@ -182,10 +182,6 @@ class TrainConfig:
     eval_first_step: bool = True
     max_wallclock_seconds: float = 600.0
     checkpoint_every: int = 0
-    checkpoint_archive_limit: int = 0
-    checkpoint_archive_warmdown_only: bool = False
-    post_quant_candidate_limit: int = 0
-    select_post_quant_best_checkpoint: bool = False
     resume_from: str | None = None
     use_compile: bool = False
     use_lawa: bool = True
@@ -236,26 +232,6 @@ class BenchmarkStats:
     train_tokens_per_second: float
     eval_tokens_per_second: float
     eval_seconds: float
-
-
-@dataclass
-class PostQuantCandidate:
-    candidate_id: str
-    source: str
-    checkpoint_path: str
-    checkpoint_step: int
-    elapsed_training_seconds: float
-    total_tokens: int
-    train_loss: float | None
-    float_val_loss: float | None
-    float_val_bpb: float | None
-    reload_val_loss: float | None
-    reload_val_bpb: float | None
-    reload_token_count: int
-    reload_eval_seconds: float
-    artifact_bytes: int
-    artifact_dir: str
-    selected: bool = False
 
 
 @dataclass
@@ -2150,90 +2126,6 @@ def reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg: Tr
         "tail.3.attn.q_proj.weight",
         "tail.3.attn.out_proj.weight",
     )
-
-
-def switch_branch_tip_neighbor_carrier_to_no_qat_post_quant_checkpoint_selection(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if not model_cfg.final_tail_neighbor_mixer or not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
-        return
-    expected_tail_bonuses = (
-        model_cfg.d_model * 8,
-        model_cfg.d_model * 7,
-        model_cfg.d_model * 6 + model_cfg.d_model // 8,
-    )
-    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank is not None:
-        return
-    if model_cfg.tail_q_low_ranks != (0, model_cfg.d_model // 4, model_cfg.d_model // 8):
-        return
-    if model_cfg.penultimate_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.2.mlp.",
-        "tail.2.attn.q_proj.down_proj.weight",
-        "tail.2.attn.q_proj.up_proj.weight",
-        "tail.2.attn.out_proj.weight",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if cfg.checkpoint_every != 0 or cfg.checkpoint_archive_limit != 0 or cfg.post_quant_candidate_limit != 0:
-        return
-    if cfg.select_post_quant_best_checkpoint:
-        return
-    model_cfg.fake_quant_during_train = False
-    model_cfg.attn_fake_quant_during_train = None
-    model_cfg.penultimate_tail_mlp_fake_quant_during_train = None
-    model_cfg.final_tail_mlp_fake_quant_during_train = None
-    cfg.checkpoint_every = 32
-    cfg.checkpoint_archive_limit = 2
-    cfg.checkpoint_archive_warmdown_only = True
-    cfg.post_quant_candidate_limit = 2
-    cfg.select_post_quant_best_checkpoint = True
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -3991,55 +3883,6 @@ def checkpoint_paths(output_dir: Path) -> tuple[Path, Path]:
     return ckpt_dir / "latest.pt", ckpt_dir / "final.pt"
 
 
-def archived_checkpoint_dir(output_dir: Path) -> Path:
-    return output_dir / "checkpoints" / "archived"
-
-
-def archived_checkpoint_path(output_dir: Path, step: int) -> Path:
-    return archived_checkpoint_dir(output_dir) / f"step-{step:06d}.pt"
-
-
-def parse_archived_checkpoint_step(path: Path) -> int | None:
-    stem = path.stem
-    if not stem.startswith("step-"):
-        return None
-    try:
-        return int(stem.removeprefix("step-"))
-    except ValueError:
-        return None
-
-
-def list_archived_checkpoints(output_dir: Path) -> list[Path]:
-    archive_dir = archived_checkpoint_dir(output_dir)
-    if not archive_dir.is_dir():
-        return []
-    items: list[tuple[int, Path]] = []
-    for path in archive_dir.glob("step-*.pt"):
-        step = parse_archived_checkpoint_step(path)
-        if step is None:
-            continue
-        items.append((step, path))
-    items.sort()
-    return [path for _step, path in items]
-
-
-def prune_archived_checkpoints(output_dir: Path, keep_last: int) -> None:
-    if keep_last <= 0:
-        return
-    archived = list_archived_checkpoints(output_dir)
-    for path in archived[:-keep_last]:
-        path.unlink(missing_ok=True)
-
-
-def should_archive_checkpoint(cfg: TrainConfig, completed_steps: int, schedule_total_steps: int) -> bool:
-    if cfg.checkpoint_archive_limit <= 0:
-        return False
-    if not cfg.checkpoint_archive_warmdown_only:
-        return True
-    warmdown_start = max(cfg.optim.warmup_steps, schedule_total_steps - cfg.optim.warmdown_steps)
-    return completed_steps >= warmdown_start
-
-
 def save_checkpoint(
     path: str | Path,
     cfg: TrainConfig,
@@ -4108,193 +3951,6 @@ def load_checkpoint(
         last_val=None if last_val is None else EvalStats(**last_val),
         checkpoint_path=str(path),
     )
-
-
-def score_post_quant_checkpoint_candidate(
-    cfg: TrainConfig,
-    output_dir: Path,
-    run_id: str,
-    cfg_hash: str,
-    checkpoint_path: Path,
-    candidate_id: str,
-    source: str,
-    raw_model: nn.Module,
-    opt_bundle: OptimBundle,
-    train_loader: DistributedTokenLoader,
-    lawa: LinearWeightAverager | None,
-    device: torch.device,
-    val_tokens: Tensor,
-    base_bytes_lut: Tensor | None,
-    has_leading_space_lut: Tensor | None,
-    is_boundary_token_lut: Tensor | None,
-) -> tuple[PostQuantCandidate, ResumeState]:
-    resume_state = load_checkpoint(checkpoint_path, cfg, raw_model, opt_bundle, train_loader, lawa)
-    candidate_output_dir = output_dir / "post_quant_candidates" / candidate_id
-    export_stats, _ = export_quantized_artifact(
-        cfg=cfg,
-        model=raw_model,
-        output_dir=candidate_output_dir,
-        run_id=f"{run_id}-{candidate_id}",
-        cfg_hash=cfg_hash,
-        val_stats=resume_state.last_val,
-    )
-    reloaded_model, _manifest, _artifact_dir = load_model_from_artifact(candidate_output_dir / cfg.artifact_bundle_name, device)
-    reload_val = eval_val(
-        cfg=cfg,
-        model=reloaded_model,
-        rank=0,
-        world_size=1,
-        device=device,
-        val_tokens=val_tokens,
-        base_bytes_lut=base_bytes_lut,
-        has_leading_space_lut=has_leading_space_lut,
-        is_boundary_token_lut=is_boundary_token_lut,
-    )
-    atomic_write_json(
-        candidate_output_dir / "artifact_reload_eval.json",
-        {
-            "val_loss": reload_val.val_loss,
-            "val_bpb": reload_val.val_bpb,
-            "token_count": reload_val.token_count,
-            "eval_seconds": reload_val.eval_seconds,
-        },
-    )
-    del reloaded_model
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    candidate = PostQuantCandidate(
-        candidate_id=candidate_id,
-        source=source,
-        checkpoint_path=str(checkpoint_path),
-        checkpoint_step=resume_state.next_step,
-        elapsed_training_seconds=resume_state.elapsed_training_seconds,
-        total_tokens=resume_state.total_tokens,
-        train_loss=resume_state.last_train_loss,
-        float_val_loss=None if resume_state.last_val is None else resume_state.last_val.val_loss,
-        float_val_bpb=None if resume_state.last_val is None else resume_state.last_val.val_bpb,
-        reload_val_loss=reload_val.val_loss,
-        reload_val_bpb=reload_val.val_bpb,
-        reload_token_count=reload_val.token_count,
-        reload_eval_seconds=reload_val.eval_seconds,
-        artifact_bytes=export_stats.artifact_bytes,
-        artifact_dir=export_stats.artifact_dir,
-    )
-    return candidate, resume_state
-
-
-def post_quant_candidate_sort_key(candidate: PostQuantCandidate) -> tuple[float, int, int, int]:
-    return (
-        math.inf if candidate.reload_val_bpb is None else candidate.reload_val_bpb,
-        candidate.artifact_bytes,
-        0 if candidate.source == "final" else 1,
-        -candidate.checkpoint_step,
-    )
-
-
-def select_best_post_quant_checkpoint(
-    cfg: TrainConfig,
-    output_dir: Path,
-    run_id: str,
-    cfg_hash: str,
-    raw_model: nn.Module,
-    opt_bundle: OptimBundle,
-    train_loader: DistributedTokenLoader,
-    lawa: LinearWeightAverager | None,
-    device: torch.device,
-    final_checkpoint_path: Path,
-    val_tokens: Tensor,
-    base_bytes_lut: Tensor | None,
-    has_leading_space_lut: Tensor | None,
-    is_boundary_token_lut: Tensor | None,
-) -> tuple[ExportStats, EvalStats, ResumeState]:
-    archived_paths = list_archived_checkpoints(output_dir)
-    if cfg.post_quant_candidate_limit > 0:
-        archived_paths = archived_paths[-cfg.post_quant_candidate_limit :]
-    candidate_specs: list[tuple[str, str, Path]] = []
-    for path in archived_paths:
-        step = parse_archived_checkpoint_step(path)
-        if step is None:
-            continue
-        candidate_specs.append((f"archived-step-{step:06d}", "archived", path))
-    candidate_specs.append(("final", "final", final_checkpoint_path))
-
-    if not candidate_specs:
-        raise ConfigError("post-quant checkpoint selection requires at least one candidate checkpoint")
-
-    candidate_records: list[PostQuantCandidate] = []
-    candidate_resume_states: dict[str, ResumeState] = {}
-    for candidate_id, source, checkpoint_path in candidate_specs:
-        candidate, resume_state = score_post_quant_checkpoint_candidate(
-            cfg=cfg,
-            output_dir=output_dir,
-            run_id=run_id,
-            cfg_hash=cfg_hash,
-            checkpoint_path=checkpoint_path,
-            candidate_id=candidate_id,
-            source=source,
-            raw_model=raw_model,
-            opt_bundle=opt_bundle,
-            train_loader=train_loader,
-            lawa=lawa,
-            device=device,
-            val_tokens=val_tokens,
-            base_bytes_lut=base_bytes_lut,
-            has_leading_space_lut=has_leading_space_lut,
-            is_boundary_token_lut=is_boundary_token_lut,
-        )
-        candidate_records.append(candidate)
-        candidate_resume_states[candidate_id] = resume_state
-
-    winner = min(candidate_records, key=post_quant_candidate_sort_key)
-    winner.selected = True
-    winner_resume_state = candidate_resume_states[winner.candidate_id]
-    load_checkpoint(Path(winner.checkpoint_path), cfg, raw_model, opt_bundle, train_loader, lawa)
-    winner_float_val = winner_resume_state.last_val
-    if winner_float_val is None:
-        winner_float_val = eval_val(
-            cfg=cfg,
-            model=raw_model,
-            rank=0,
-            world_size=1,
-            device=device,
-            val_tokens=val_tokens,
-            base_bytes_lut=base_bytes_lut,
-            has_leading_space_lut=has_leading_space_lut,
-            is_boundary_token_lut=is_boundary_token_lut,
-        )
-    winner.float_val_loss = winner_float_val.val_loss
-    winner.float_val_bpb = winner_float_val.val_bpb
-    export_stats, _ = export_quantized_artifact(
-        cfg=cfg,
-        model=raw_model,
-        output_dir=output_dir,
-        run_id=run_id,
-        cfg_hash=cfg_hash,
-        val_stats=winner_float_val,
-    )
-    export_stats.reload_val_loss = winner.reload_val_loss
-    export_stats.reload_val_bpb = winner.reload_val_bpb
-    atomic_write_json(
-        output_dir / "artifact_reload_eval.json",
-        {
-            "val_loss": winner.reload_val_loss,
-            "val_bpb": winner.reload_val_bpb,
-            "token_count": winner.reload_token_count,
-            "eval_seconds": winner.reload_eval_seconds,
-        },
-    )
-    atomic_write_json(
-        output_dir / "post_quant_selection.json",
-        {
-            "selection_mode": "lowest_reload_val_bpb",
-            "selected_candidate_id": winner.candidate_id,
-            "selected_checkpoint_path": winner.checkpoint_path,
-            "selected_checkpoint_step": winner.checkpoint_step,
-            "selected_source": winner.source,
-            "candidates": [dataclasses.asdict(candidate) for candidate in candidate_records],
-        },
-    )
-    return export_stats, winner_float_val, winner_resume_state
 
 
 def estimate_mfu_percent(_cfg: TrainConfig, _tokens_per_second: float, _num_params: int, _device: torch.device) -> float:
@@ -4494,18 +4150,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("counted_code_paths must not be empty")
     if cfg.evaluate_only and not cfg.load_artifact_path:
         raise ConfigError("evaluate_only requires load_artifact_path")
-    if cfg.checkpoint_archive_limit < 0:
-        raise ConfigError("checkpoint_archive_limit must be >= 0")
-    if cfg.post_quant_candidate_limit < 0:
-        raise ConfigError("post_quant_candidate_limit must be >= 0")
-    if cfg.checkpoint_archive_limit > 0 and cfg.checkpoint_every <= 0:
-        raise ConfigError("checkpoint_archive_limit requires checkpoint_every > 0")
-    if cfg.select_post_quant_best_checkpoint and cfg.checkpoint_every <= 0:
-        raise ConfigError("select_post_quant_best_checkpoint requires checkpoint_every > 0")
-    if cfg.select_post_quant_best_checkpoint and cfg.post_quant_candidate_limit <= 0:
-        raise ConfigError("select_post_quant_best_checkpoint requires post_quant_candidate_limit > 0")
-    if cfg.select_post_quant_best_checkpoint and cfg.train_phase_only:
-        raise ConfigError("select_post_quant_best_checkpoint requires validation to stay enabled")
 
 
 def validate_runtime_config(cfg: TrainConfig, world_size: int) -> None:
@@ -4803,24 +4447,6 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                     last_train_loss=last_train_loss,
                     last_val=last_val,
                 )
-                if should_archive_checkpoint(cfg, completed_steps, schedule_total_steps):
-                    archive_path = archived_checkpoint_path(output_dir, completed_steps)
-                    save_checkpoint(
-                        archive_path,
-                        cfg,
-                        run_id,
-                        cfg_hash,
-                        raw_model,
-                        opt_bundle,
-                        train_loader,
-                        lawa,
-                        next_step=completed_steps,
-                        elapsed_training_seconds=training_elapsed_prior + (time.time() - training_start),
-                        total_tokens=total_tokens,
-                        last_train_loss=last_train_loss,
-                        last_val=last_val,
-                    )
-                    prune_archived_checkpoints(output_dir, cfg.checkpoint_archive_limit)
 
         validation_enabled = val_tokens is not None and not cfg.train_phase_only
 
@@ -4902,17 +4528,41 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
         num_params = count_parameters(raw_model)
         benchmark = None
         export_stats = None
+        if cfg.save_final_quantized and rank0:
+            export_stats, _ = export_quantized_artifact(
+                cfg=cfg,
+                model=raw_model,
+                output_dir=output_dir,
+                run_id=run_id,
+                cfg_hash=cfg_hash,
+                val_stats=last_val,
+            )
+            if cfg.verify_export_reload and validation_enabled:
+                reloaded_model, _manifest, _artifact_dir = load_model_from_artifact(output_dir / cfg.artifact_bundle_name, device)
+                reload_val = eval_val(
+                    cfg=cfg,
+                    model=reloaded_model,
+                    rank=0,
+                    world_size=1,
+                    device=device,
+                    val_tokens=val_tokens,
+                    base_bytes_lut=base_bytes_lut,
+                    has_leading_space_lut=has_leading_space_lut,
+                    is_boundary_token_lut=is_boundary_token_lut,
+                )
+                export_stats.reload_val_loss = reload_val.val_loss
+                export_stats.reload_val_bpb = reload_val.val_bpb
+                atomic_write_json(
+                    output_dir / "artifact_reload_eval.json",
+                    {
+                        "val_loss": reload_val.val_loss,
+                        "val_bpb": reload_val.val_bpb,
+                        "token_count": reload_val.token_count,
+                        "eval_seconds": reload_val.eval_seconds,
+                    },
+                )
+
         checkpoint_path = None
-        selected_resume_state = ResumeState(
-            run_id=run_id,
-            config_hash=cfg_hash,
-            next_step=completed_steps,
-            elapsed_training_seconds=training_seconds,
-            total_tokens=total_tokens,
-            last_train_loss=last_train_loss,
-            last_val=last_val,
-            checkpoint_path=str(final_ckpt_path),
-        )
         if rank0:
             save_checkpoint(
                 latest_ckpt_path,
@@ -4942,89 +4592,6 @@ def train_one_run(cfg: TrainConfig) -> RunSummary:
                 elapsed_training_seconds=training_seconds,
                 total_tokens=total_tokens,
                 last_train_loss=last_train_loss,
-                last_val=last_val,
-            )
-            if cfg.save_final_quantized:
-                if cfg.select_post_quant_best_checkpoint:
-                    if not validation_enabled or val_tokens is None:
-                        raise ConfigError("select_post_quant_best_checkpoint requires validation tokens")
-                    export_stats, last_val, selected_resume_state = select_best_post_quant_checkpoint(
-                        cfg=cfg,
-                        output_dir=output_dir,
-                        run_id=run_id,
-                        cfg_hash=cfg_hash,
-                        raw_model=raw_model,
-                        opt_bundle=opt_bundle,
-                        train_loader=train_loader,
-                        lawa=lawa,
-                        device=device,
-                        final_checkpoint_path=final_ckpt_path,
-                        val_tokens=val_tokens,
-                        base_bytes_lut=base_bytes_lut,
-                        has_leading_space_lut=has_leading_space_lut,
-                        is_boundary_token_lut=is_boundary_token_lut,
-                    )
-                else:
-                    export_stats, _ = export_quantized_artifact(
-                        cfg=cfg,
-                        model=raw_model,
-                        output_dir=output_dir,
-                        run_id=run_id,
-                        cfg_hash=cfg_hash,
-                        val_stats=last_val,
-                    )
-                    if cfg.verify_export_reload and validation_enabled:
-                        reloaded_model, _manifest, _artifact_dir = load_model_from_artifact(output_dir / cfg.artifact_bundle_name, device)
-                        reload_val = eval_val(
-                            cfg=cfg,
-                            model=reloaded_model,
-                            rank=0,
-                            world_size=1,
-                            device=device,
-                            val_tokens=val_tokens,
-                            base_bytes_lut=base_bytes_lut,
-                            has_leading_space_lut=has_leading_space_lut,
-                            is_boundary_token_lut=is_boundary_token_lut,
-                        )
-                        export_stats.reload_val_loss = reload_val.val_loss
-                        export_stats.reload_val_bpb = reload_val.val_bpb
-                        atomic_write_json(
-                            output_dir / "artifact_reload_eval.json",
-                            {
-                                "val_loss": reload_val.val_loss,
-                                "val_bpb": reload_val.val_bpb,
-                                "token_count": reload_val.token_count,
-                                "eval_seconds": reload_val.eval_seconds,
-                            },
-                        )
-            save_checkpoint(
-                latest_ckpt_path,
-                cfg,
-                run_id,
-                cfg_hash,
-                raw_model,
-                opt_bundle,
-                train_loader,
-                lawa,
-                next_step=selected_resume_state.next_step,
-                elapsed_training_seconds=selected_resume_state.elapsed_training_seconds,
-                total_tokens=selected_resume_state.total_tokens,
-                last_train_loss=selected_resume_state.last_train_loss,
-                last_val=last_val,
-            )
-            save_checkpoint(
-                final_ckpt_path,
-                cfg,
-                run_id,
-                cfg_hash,
-                raw_model,
-                opt_bundle,
-                train_loader,
-                lawa,
-                next_step=selected_resume_state.next_step,
-                elapsed_training_seconds=selected_resume_state.elapsed_training_seconds,
-                total_tokens=selected_resume_state.total_tokens,
-                last_train_loss=selected_resume_state.last_train_loss,
                 last_val=last_val,
             )
             checkpoint_path = str(final_ckpt_path)
@@ -5457,7 +5024,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg)
     front_load_tail_width_on_branch_tip_neighbor_carrier(cfg)
     move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg)
-    switch_branch_tip_neighbor_carrier_to_no_qat_post_quant_checkpoint_selection(cfg)
     reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg)
     return cfg
 
