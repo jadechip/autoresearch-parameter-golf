@@ -106,6 +106,7 @@ class ModelConfig:
     q_low_rank: int = 0
     shared_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
+    tail_q_low_ranks: tuple[int, ...] | None = None
     final_tail_smear_gate: bool = False
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
@@ -321,6 +322,8 @@ def train_config_from_dict(data: Mapping[str, Any]) -> TrainConfig:
             model_payload["adapter_targets"] = tuple(model_payload["adapter_targets"])
         if "tail_mlp_hidden_bonuses" in model_payload and isinstance(model_payload["tail_mlp_hidden_bonuses"], list):
             model_payload["tail_mlp_hidden_bonuses"] = tuple(model_payload["tail_mlp_hidden_bonuses"])
+        if "tail_q_low_ranks" in model_payload and isinstance(model_payload["tail_q_low_ranks"], list):
+            model_payload["tail_q_low_ranks"] = tuple(model_payload["tail_q_low_ranks"])
         cfg.model = ModelConfig(**model_payload)
     if "optim" in payload:
         cfg.optim = OptimConfig(**dict(payload["optim"]))
@@ -1542,6 +1545,75 @@ def front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg: TrainConfig) 
     )
 
 
+def mildly_shift_non_final_tail_q_rank_later_on_front_loaded_three_block_carrier(cfg: TrainConfig) -> None:
+    model_cfg = cfg.model
+    if not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
+        return
+    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
+        return
+    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
+        return
+    expected_tail_hidden_bonuses = (
+        model_cfg.non_recurrent_mlp_hidden_bonus + model_cfg.d_model // 2,
+        model_cfg.non_recurrent_mlp_hidden_bonus,
+        model_cfg.non_recurrent_mlp_hidden_bonus - model_cfg.d_model // 2,
+    )
+    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_hidden_bonuses:
+        return
+    if model_cfg.q_low_rank != model_cfg.d_model // 4:
+        return
+    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank != 0:
+        return
+    if model_cfg.tail_q_low_ranks is not None:
+        return
+    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
+        return
+    if model_cfg.shared_mlp_fake_quant_during_train is not None:
+        return
+    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
+        return
+    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
+        return
+    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
+        return
+    if model_cfg.seq_len != 768:
+        return
+    if cfg.grad_accum_steps != 2:
+        return
+    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
+        return
+    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
+        return
+    if cfg.optim.warmdown_steps != 80:
+        return
+    if cfg.quant.low_bit_bits != 6:
+        return
+    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
+        return
+    expected_keep_float_patterns = (
+        "norm",
+        "scale",
+        "gain",
+        "adapter",
+        "lm_head",
+        "tok_emb.weight",
+        "tail.2.mlp.",
+        "tail.2.attn.q_proj.weight",
+    )
+    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
+        return
+    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
+        return
+    model_cfg.final_tail_q_low_rank = None
+    model_cfg.tail_q_low_ranks = (
+        model_cfg.d_model * 3 // 16,
+        model_cfg.d_model * 5 // 16,
+        0,
+    )
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2596,6 +2668,9 @@ class RecurrentGPT(nn.Module):
         super().__init__()
         self.cfg = cfg
         final_tail_q_low_rank = cfg.q_low_rank if cfg.final_tail_q_low_rank is None else cfg.final_tail_q_low_rank
+        tail_q_low_ranks = cfg.tail_q_low_ranks
+        if tail_q_low_ranks is not None and len(tail_q_low_ranks) != cfg.tail_layers:
+            raise ConfigError("tail_q_low_ranks must have exactly one entry per tail layer")
         non_recurrent_hidden_bonus = (
             cfg.non_recurrent_mlp_hidden_bonus
             if cfg.non_recurrent_mlp_hidden_bonus is not None
@@ -2629,7 +2704,11 @@ class RecurrentGPT(nn.Module):
                     mlp_hidden_bonus=(
                         tail_hidden_bonuses[tail_idx] if tail_hidden_bonuses is not None else non_recurrent_hidden_bonus
                     ),
-                    q_low_rank=final_tail_q_low_rank if tail_idx == cfg.tail_layers - 1 else None,
+                    q_low_rank=(
+                        tail_q_low_ranks[tail_idx]
+                        if tail_q_low_ranks is not None
+                        else (final_tail_q_low_rank if tail_idx == cfg.tail_layers - 1 else None)
+                    ),
                     mlp_fake_quant_during_train=(
                         cfg.final_tail_mlp_fake_quant_during_train if tail_idx == cfg.tail_layers - 1 else None
                     ),
@@ -3125,6 +3204,8 @@ def load_model_from_artifact(path: str | Path, device: torch.device) -> tuple[Re
         model_payload["adapter_targets"] = tuple(model_payload["adapter_targets"])
     if "tail_mlp_hidden_bonuses" in model_payload and isinstance(model_payload["tail_mlp_hidden_bonuses"], list):
         model_payload["tail_mlp_hidden_bonuses"] = tuple(model_payload["tail_mlp_hidden_bonuses"])
+    if "tail_q_low_ranks" in model_payload and isinstance(model_payload["tail_q_low_ranks"], list):
+        model_payload["tail_q_low_ranks"] = tuple(model_payload["tail_q_low_ranks"])
     model = RecurrentGPT(ModelConfig(**model_payload)).to(device)
     payload = unpack_quantized_payload(blob)
     state_dict = dequantize_state_dict_int8(payload)
@@ -3494,6 +3575,16 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
+    if cfg.model.tail_q_low_ranks is not None:
+        if cfg.model.final_tail_q_low_rank is not None:
+            raise ConfigError("tail_q_low_ranks cannot be combined with final_tail_q_low_rank")
+        if len(cfg.model.tail_q_low_ranks) != cfg.model.tail_layers:
+            raise ConfigError("tail_q_low_ranks must have exactly one entry per tail layer")
+        for rank in cfg.model.tail_q_low_ranks:
+            if rank < 0:
+                raise ConfigError("tail_q_low_ranks entries must be >= 0")
+            if rank >= cfg.model.d_model:
+                raise ConfigError("tail_q_low_ranks entries must be smaller than d_model")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
@@ -4394,6 +4485,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     flatten_near_cap_carrier_into_four_unique_blocks(cfg)
     trade_one_four_block_layer_for_three_wider_unique_blocks(cfg)
     front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg)
+    mildly_shift_non_final_tail_q_rank_later_on_front_loaded_three_block_carrier(cfg)
     return cfg
 
 
