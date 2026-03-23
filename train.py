@@ -107,7 +107,6 @@ class ModelConfig:
     shared_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
     final_tail_smear_gate: bool = False
-    final_tail_prefix_kv_cache: bool = False
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -1543,72 +1542,6 @@ def front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg: TrainConfig) 
     )
 
 
-def add_final_tail_prefix_kv_cache_on_three_block_near_cap_carrier(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.final_tail_prefix_kv_cache:
-        return
-    if not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
-        return
-    expected_tail_bonuses = (
-        model_cfg.non_recurrent_mlp_hidden_bonus + model_cfg.d_model // 2,
-        model_cfg.non_recurrent_mlp_hidden_bonus,
-        model_cfg.non_recurrent_mlp_hidden_bonus - model_cfg.d_model // 2,
-    )
-    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank != 0:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.2.mlp.",
-        "tail.2.attn.q_proj.weight",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    model_cfg.final_tail_prefix_kv_cache = True
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2459,13 +2392,7 @@ class LowRankQProjection(nn.Module):
 
 
 class GroupedQueryAttention(nn.Module):
-    def __init__(
-        self,
-        cfg: ModelConfig,
-        num_adapter_slots: int = 0,
-        q_low_rank: int | None = None,
-        prefix_kv_cache: bool = False,
-    ):
+    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0, q_low_rank: int | None = None):
         super().__init__()
         if cfg.d_model % cfg.num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
@@ -2534,7 +2461,6 @@ class GroupedQueryAttention(nn.Module):
             zero_init=True,
         )
         self.q_gain = nn.Parameter(torch.full((cfg.num_heads,), float(cfg.qk_gain_init)))
-        self.prefix_kv_cache_scale = nn.Parameter(torch.zeros(cfg.num_heads)) if prefix_kv_cache else None
         self.dropout = nn.Dropout(cfg.resid_dropout)
 
     def set_global_step(self, step: int) -> None:
@@ -2542,15 +2468,6 @@ class GroupedQueryAttention(nn.Module):
         self.k_proj.set_global_step(step)
         self.v_proj.set_global_step(step)
         self.out_proj.set_global_step(step)
-
-    def exclusive_prefix_mean(self, x: Tensor) -> Tensor:
-        if x.size(2) <= 1:
-            return torch.zeros_like(x)
-        prefix = x.cumsum(dim=2) - x
-        counts = torch.arange(x.size(2), device=x.device, dtype=x.dtype).view(1, 1, -1, 1)
-        safe_counts = counts.clamp_min(1.0)
-        mean = prefix / safe_counts
-        return torch.where(counts > 0, mean, torch.zeros_like(mean))
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
         bsz, seqlen, dim = x.shape
@@ -2571,13 +2488,6 @@ class GroupedQueryAttention(nn.Module):
             v = v.repeat_interleave(repeat, dim=1)
 
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
-        if self.prefix_kv_cache_scale is not None:
-            cache_k = self.exclusive_prefix_mean(k)
-            cache_v = self.exclusive_prefix_mean(v)
-            cache_k = cache_k * torch.rsqrt(cache_k.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
-            cache_gate = torch.sigmoid((q * cache_k).sum(dim=-1, keepdim=True) * (self.head_dim ** -0.5))
-            cache_scale = self.prefix_kv_cache_scale.to(dtype=attn.dtype).view(1, -1, 1, 1)
-            attn = attn + cache_v * cache_gate * cache_scale
         attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, dim)
         return self.dropout(self.out_proj(attn, slot=slot))
 
@@ -2637,17 +2547,11 @@ class TransformerBlock(nn.Module):
         q_low_rank: int | None = None,
         mlp_fake_quant_during_train: bool | None = None,
         smear_gate: bool = False,
-        prefix_kv_cache: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
         self.mlp_norm = RMSNorm(cfg.d_model)
-        self.attn = GroupedQueryAttention(
-            cfg,
-            num_adapter_slots=num_adapter_slots,
-            q_low_rank=q_low_rank,
-            prefix_kv_cache=prefix_kv_cache,
-        )
+        self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots, q_low_rank=q_low_rank)
         self.mlp = ReLU2MLP(
             cfg,
             num_adapter_slots=num_adapter_slots,
@@ -2730,7 +2634,6 @@ class RecurrentGPT(nn.Module):
                         cfg.final_tail_mlp_fake_quant_during_train if tail_idx == cfg.tail_layers - 1 else None
                     ),
                     smear_gate=cfg.final_tail_smear_gate and tail_idx == cfg.tail_layers - 1,
-                    prefix_kv_cache=cfg.final_tail_prefix_kv_cache and tail_idx == cfg.tail_layers - 1,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -4491,7 +4394,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     flatten_near_cap_carrier_into_four_unique_blocks(cfg)
     trade_one_four_block_layer_for_three_wider_unique_blocks(cfg)
     front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg)
-    add_final_tail_prefix_kv_cache_on_three_block_near_cap_carrier(cfg)
     return cfg
 
 
