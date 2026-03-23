@@ -107,7 +107,6 @@ class ModelConfig:
     shared_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
     final_tail_smear_gate: bool = False
-    input_prev_token_rank: int = 0
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -1543,72 +1542,6 @@ def front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg: TrainConfig) 
     )
 
 
-def add_shifted_token_mlp_on_three_block_near_cap_carrier(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
-        return
-    if model_cfg.input_prev_token_rank != 0:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
-        return
-    expected_tail_hidden_bonuses = (
-        model_cfg.non_recurrent_mlp_hidden_bonus + model_cfg.d_model // 2,
-        model_cfg.non_recurrent_mlp_hidden_bonus,
-        model_cfg.non_recurrent_mlp_hidden_bonus - model_cfg.d_model // 2,
-    )
-    if tuple(model_cfg.tail_mlp_hidden_bonuses or ()) != expected_tail_hidden_bonuses:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank != 0:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.2.mlp.",
-        "tail.2.attn.q_proj.weight",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    model_cfg.input_prev_token_rank = model_cfg.d_model // 16
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2658,23 +2591,6 @@ class TransformerBlock(nn.Module):
         return x
 
 
-class ShiftedTokenMLP(nn.Module):
-    def __init__(self, dim: int, rank: int, init_std: float):
-        super().__init__()
-        self.down = nn.Linear(dim, rank, bias=False)
-        self.up = nn.Linear(rank, dim, bias=False)
-        nn.init.normal_(self.down.weight, mean=0.0, std=init_std)
-        nn.init.zeros_(self.up.weight)
-
-    def forward(self, x: Tensor) -> Tensor:
-        if x.size(1) <= 1:
-            return torch.zeros_like(x)
-        prev = torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
-        prev = torch.relu(self.down(prev))
-        prev = prev.square()
-        return self.up(prev)
-
-
 class RecurrentGPT(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
@@ -2690,11 +2606,6 @@ class RecurrentGPT(nn.Module):
             raise ConfigError("tail_mlp_hidden_bonuses must have exactly one entry per tail layer")
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
-        self.input_prev_token_mlp = (
-            ShiftedTokenMLP(cfg.d_model, cfg.input_prev_token_rank, cfg.emb_init_std)
-            if cfg.input_prev_token_rank > 0
-            else None
-        )
         self.stem = nn.ModuleList(
             [TransformerBlock(cfg, num_adapter_slots=0, mlp_hidden_bonus=non_recurrent_hidden_bonus) for _ in range(cfg.stem_layers)]
         )
@@ -2754,8 +2665,6 @@ class RecurrentGPT(nn.Module):
 
     def forward(self, input_ids: Tensor, target_ids: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
         x = self.emb_norm(self.tok_emb(input_ids))
-        if self.input_prev_token_mlp is not None:
-            x = x + self.input_prev_token_mlp(x)
         for block in self.stem:
             x = block(x, slot=None)
         for loop_idx in range(self.cfg.recurrence_loops):
@@ -3585,10 +3494,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
-    if cfg.model.input_prev_token_rank < 0:
-        raise ConfigError("input_prev_token_rank must be >= 0")
-    if cfg.model.input_prev_token_rank >= cfg.model.d_model:
-        raise ConfigError("input_prev_token_rank must be smaller than d_model")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
@@ -4489,7 +4394,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     flatten_near_cap_carrier_into_four_unique_blocks(cfg)
     trade_one_four_block_layer_for_three_wider_unique_blocks(cfg)
     front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg)
-    add_shifted_token_mlp_on_three_block_near_cap_carrier(cfg)
     return cfg
 
 
