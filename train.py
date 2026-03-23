@@ -2929,6 +2929,9 @@ class TransformerBlock(nn.Module):
             return torch.zeros_like(x)
         return torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
 
+    def causal_neighbor_context(self, x: Tensor) -> Tensor:
+        return 0.5 * (self.causal_neighbor(x) + self.causal_smear(x))
+
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
         x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
@@ -2936,7 +2939,7 @@ class TransformerBlock(nn.Module):
             x = x + self.causal_smear(x) * self.residual_scale(self.smear_scale, x, slot)
         if self.neighbor_scale is not None:
             assert self.neighbor_norm is not None
-            x = x + self.causal_neighbor(self.neighbor_norm(x)) * self.residual_scale(self.neighbor_scale, x, slot)
+            x = x + self.causal_neighbor_context(self.neighbor_norm(x)) * self.residual_scale(self.neighbor_scale, x, slot)
         return x
 
 
