@@ -28,6 +28,25 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def normalize_blueprint(raw: Any, index: int) -> dict[str, Any]:
+    default_label = chr(ord("A") + index)
+    if isinstance(raw, str):
+        return {
+            "label": default_label,
+            "title": raw,
+            "summary": raw,
+            "must_change_axes": [],
+        }
+    if not isinstance(raw, dict):
+        raise ValueError(f"unsupported aggressive blueprint payload: {raw!r}")
+    return {
+        "label": str(raw.get("label", default_label)),
+        "title": str(raw.get("title", raw.get("summary", f"Variant {default_label}"))),
+        "summary": str(raw.get("summary", raw.get("title", f"Variant {default_label}"))),
+        "must_change_axes": [str(item) for item in raw.get("must_change_axes", [])],
+    }
+
+
 def hydrate_campaign_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     ideas_json_value = payload.get("ideas_json")
     if not ideas_json_value:
@@ -49,17 +68,44 @@ def hydrate_campaign_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         source_idea = source_ideas.get(str(idea.get("id")))
         if source_idea is None:
             continue
+        desired_title = str(source_idea.get("title", idea.get("title", "")))
+        desired_branch_family = str(source_idea.get("branch_family", idea.get("branch_family", "other")))
+        desired_kind = str(source_idea.get("kind", idea.get("kind", "existing_surface")))
         desired_attempt_mode = str(source_idea.get("attempt_mode", "independent_architecture_variants"))
+        desired_goal = str(source_idea.get("goal", idea.get("goal", "")))
+        desired_hints = [str(item) for item in source_idea.get("hints", [])]
         desired_axes = [str(item) for item in source_idea.get("must_change_axes", [])]
         desired_forbidden = [str(item) for item in source_idea.get("forbidden_refinements", [])]
+        desired_blueprints = [
+            normalize_blueprint(item, index)
+            for index, item in enumerate(source_idea.get("attempt_blueprints", []))
+        ]
+        if idea.get("title") != desired_title:
+            idea["title"] = desired_title
+            changed = True
+        if idea.get("branch_family") != desired_branch_family:
+            idea["branch_family"] = desired_branch_family
+            changed = True
+        if idea.get("kind") != desired_kind:
+            idea["kind"] = desired_kind
+            changed = True
         if idea.get("attempt_mode") != desired_attempt_mode:
             idea["attempt_mode"] = desired_attempt_mode
+            changed = True
+        if idea.get("goal") != desired_goal:
+            idea["goal"] = desired_goal
+            changed = True
+        if idea.get("hints") != desired_hints:
+            idea["hints"] = desired_hints
             changed = True
         if idea.get("must_change_axes") != desired_axes:
             idea["must_change_axes"] = desired_axes
             changed = True
         if idea.get("forbidden_refinements") != desired_forbidden:
             idea["forbidden_refinements"] = desired_forbidden
+            changed = True
+        if idea.get("attempt_blueprints") != desired_blueprints:
+            idea["attempt_blueprints"] = desired_blueprints
             changed = True
     if changed:
         payload["updated_at_unix"] = time.time()
@@ -85,6 +131,12 @@ def load_campaign(state_dir: Path) -> dict[str, Any]:
 
 
 def normalize_idea(raw: dict[str, Any], attempts_allowed: int) -> dict[str, Any]:
+    resolved_attempts_allowed = int(raw.get("attempts_allowed", attempts_allowed))
+    blueprints = [normalize_blueprint(item, index) for index, item in enumerate(raw.get("attempt_blueprints", []))]
+    if blueprints and len(blueprints) != resolved_attempts_allowed:
+        raise ValueError(
+            f"idea {raw['id']} defines {len(blueprints)} attempt_blueprints but attempts_allowed={resolved_attempts_allowed}"
+        )
     return {
         "id": str(raw["id"]),
         "title": str(raw["title"]),
@@ -95,8 +147,9 @@ def normalize_idea(raw: dict[str, Any], attempts_allowed: int) -> dict[str, Any]
         "hints": [str(item) for item in raw.get("hints", [])],
         "must_change_axes": [str(item) for item in raw.get("must_change_axes", [])],
         "forbidden_refinements": [str(item) for item in raw.get("forbidden_refinements", [])],
+        "attempt_blueprints": blueprints,
         "status": "pending",
-        "attempts_allowed": int(raw.get("attempts_allowed", attempts_allowed)),
+        "attempts_allowed": resolved_attempts_allowed,
         "attempts_used": 0,
         "accepted_attempts": 0,
         "best_val_bpb": None,
@@ -230,6 +283,20 @@ def print_payload(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def idea_runtime_view(idea: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(idea)
+    blueprints = [dict(item) for item in idea.get("attempt_blueprints", [])]
+    attempts_used = int(idea.get("attempts_used", 0))
+    attempts_allowed = int(idea.get("attempts_allowed", 0))
+    next_index = attempts_used if attempts_used < len(blueprints) else None
+    payload["attempts_remaining"] = max(0, attempts_allowed - attempts_used)
+    payload["next_attempt_number"] = None if next_index is None else attempts_used + 1
+    payload["completed_blueprints"] = blueprints[:attempts_used]
+    payload["remaining_blueprints"] = blueprints[attempts_used:]
+    payload["next_attempt_blueprint"] = None if next_index is None else blueprints[next_index]
+    return payload
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="State for the aggressive idea-by-idea autoresearch campaign.")
     parser.add_argument("--state_dir", type=str, default=str(default_state_dir()))
@@ -264,7 +331,7 @@ def main() -> None:
         idea = current_idea(payload)
         if idea is None:
             raise ValueError("no active idea")
-        print_payload(idea)
+        print_payload(idea_runtime_view(idea))
         return
     if args.command == "require-active":
         print_payload(require_active(state_dir))
