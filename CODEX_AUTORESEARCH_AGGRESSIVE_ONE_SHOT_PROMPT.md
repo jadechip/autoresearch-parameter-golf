@@ -27,6 +27,9 @@ Before doing anything else:
 - inspect `$STATE_DIR/notes.md`
 - inspect `COMPETITIVE_PRIORS.md`
 - inspect `runs/autoresearch_5090_aggressive/index/best.json` if it exists
+- inspect the active idea via:
+  `.venv/bin/python scripts/aggressive_autoresearch_campaign.py --state_dir "$STATE_DIR" current`
+- read its `next_attempt_blueprint` and treat that blueprint as mandatory
 
 Execution model for this invocation:
 - perform at most one code change
@@ -62,7 +65,13 @@ Aggressive-campaign rules:
   - `attempt_mode`
   - `must_change_axes`
   - `forbidden_refinements`
+- `current` also exposes:
+  - `next_attempt_number`
+  - `next_attempt_blueprint`
+  - `completed_blueprints`
+  - `remaining_blueprints`
 - respect them literally
+- implement the exact `next_attempt_blueprint`; do not pick a different safer mutation inside the same story
 - if the idea needs a missing self-contained module in `train.py`, implement it instead of shrinking the idea into another precision nudge
 - preserve causal scoring, exportability, reloadability, and honest byte accounting
 - do not stack multiple hard ideas into one run unless the current idea explicitly calls for that combination
@@ -75,8 +84,8 @@ Aggressive-campaign rules:
 
 Variant validity rule:
 - A valid attempt must either:
-  - introduce the named module or mechanism if it is not already present, or
-  - change at least two macro axes from the accepted aggressive branch
+  - introduce the named module or mechanism from the blueprint if it is not already present, or
+  - change at least two macro axes from the accepted aggressive branch in the way the blueprint describes
 - useful macro axes include:
   - shared vs tail partition
   - effective depth
@@ -87,6 +96,14 @@ Variant validity rule:
   - Q-rank topology
   - coarse quantization group or schedule
 - if you cannot describe the attempt as a new architecture variant in one sentence, it is probably too small
+- if the resulting carrier still looks like the current depth-3 neighbor-mixer line with a few toggles, it is too small
+
+Free-form redesign rule:
+- you are allowed to replace the accepted carrier wholesale
+- you are allowed to change params, layers, partitioning, context, batch regime, and module stack
+- you are allowed to write a new self-contained module in `train.py`
+- large score swings, OOMs, and even clearly losing `1.60+` runs are acceptable telemetry if the redesign is real
+- do not optimize for staying close to the current winner; optimize for honestly testing the blueprint
 
 Attempt-style rule:
 - attempts 1-4 should be the most different variants, not the safest ones
@@ -103,6 +120,7 @@ Search policy for this aggressive loop:
 - treat leaderboard patterns as priors, not recipes
 - favor meaningful branch establishment over tiny score polishing
 - the campaign default regime is roughly 15.2 MB to 15.9 MB, 11-12 layers, d_model 512, about 3x MLP, seq_len 2048, and batch around 524K tokens when feasible
+- the active blueprint may deliberately step outside the current accepted branch shape; that is expected
 - for XSA, cache, SmearGate, TTT, Canon, or smarter local-token stories, isolate the new idea enough that the result is interpretable
 - if an idea naturally implies two families, keep them separate rather than blending them immediately
 - do not spend low-rank-Q attempts only on same-carrier tail width or another copy of the same local module
@@ -111,7 +129,7 @@ Search policy for this aggressive loop:
 
 Required loop for this invocation:
 1. inspect the current aggressive branch tip, `$STATE_DIR/session.json`, `$STATE_DIR/aggressive_campaign.json`, `configs/aggressive_autoresearch_ideas.json`, `AGGRESSIVE_AUTORESEARCH_IDEAS.md`, `$STATE_DIR/notes.md`, and recent commits
-2. choose one concrete architecture variant inside the current idea and write down which macro axes it changes
+2. read `next_attempt_blueprint`, restate it in your own words, and write down which macro axes it changes
 3. edit `train.py`
 4. commit the experiment, including the idea id in the commit message
 5. run exactly one `bash scripts/run_autoresearch_experiment.sh`

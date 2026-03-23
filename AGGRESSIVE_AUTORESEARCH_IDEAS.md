@@ -12,11 +12,17 @@ The point of this campaign is not tiny local hill-climbing. The point is to use
 Codex as a coding agent that can create or reshape architecture surfaces while
 still preserving the keep/revert discipline and structured run accounting.
 
+The concrete A-F redesign blueprints live in
+[`configs/aggressive_autoresearch_ideas.json`](configs/aggressive_autoresearch_ideas.json).
+The active aggressive agent should implement the next blueprint literally, not
+invent a safer nearby mutation.
+
 ## Architecture Sprint Rule
 
 For every story:
 
 - Attempts 1 through 6 should be treated as variants A through F, not as a local refinement ladder.
+- Each attempt is blueprint-locked: implement the next untried redesign variant from the ideas JSON.
 - A valid attempt must either:
   - introduce the named module or mechanism if it is not already present, or
   - change at least two macro axes from the accepted aggressive branch.
@@ -39,6 +45,16 @@ Disallowed attempt types unless they are only fixing a crash blocker in an other
 - branch-tip "restore" attempts that merely move back toward the current winner
 
 The first four attempts of a story should be the most different variants, not the safest ones.
+
+## Free-Form Redesign Rule
+
+- These attempts are allowed to rewrite the carrier shape, layer count, depth allocation,
+  parameter budget, context schedule, and module stack.
+- Big score swings are acceptable telemetry. A `1.60+` or failed run is better than a fake
+  `1.54` that only nudged the current winner.
+- If a story implies a truly new mechanism, the agent should write that mechanism instead of
+  shrinking the story into another local toggle.
+- The campaign should prefer cleanly interpretable branch establishment over conservative branch polish.
 
 ## Story 1: XSA + Neural Cache
 
