@@ -108,10 +108,6 @@ class ModelConfig:
     final_tail_q_low_rank: int | None = None
     tail_q_low_ranks: tuple[int, ...] | None = None
     final_tail_smear_gate: bool = False
-    xsa_window_size: int = 0
-    xsa_tail_layers: int = 0
-    xsa_cache_slots: int = 2
-    xsa_scale_init: float = 0.1
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -1548,7 +1544,6 @@ def front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg: TrainConfig) 
         model_cfg.non_recurrent_mlp_hidden_bonus - half_step,
     )
 
-
 def move_full_rank_q_anchor_to_widest_three_block_tail(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
@@ -1624,77 +1619,6 @@ def move_full_rank_q_anchor_to_widest_three_block_tail(cfg: TrainConfig) -> None
         "tail.2.mlp.",
         "tail.0.attn.q_proj.weight",
     )
-
-
-def add_recent_window_tail_cache_on_three_block_carrier(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
-        return
-    expected_tail_bonuses = (
-        model_cfg.non_recurrent_mlp_hidden_bonus + model_cfg.d_model // 2,
-        model_cfg.non_recurrent_mlp_hidden_bonus,
-        model_cfg.non_recurrent_mlp_hidden_bonus - model_cfg.d_model // 2,
-    )
-    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank != 0:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.2.mlp.",
-        "tail.2.attn.q_proj.weight",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.xsa_window_size > 0 or model_cfg.xsa_tail_layers > 0:
-        return
-    model_cfg.xsa_window_size = 128
-    model_cfg.xsa_tail_layers = 1
-    model_cfg.xsa_cache_slots = 2
-    model_cfg.xsa_scale_init = 0.05
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2545,14 +2469,7 @@ class LowRankQProjection(nn.Module):
 
 
 class GroupedQueryAttention(nn.Module):
-    def __init__(
-        self,
-        cfg: ModelConfig,
-        num_adapter_slots: int = 0,
-        q_low_rank: int | None = None,
-        xsa_window_size: int = 0,
-        xsa_cache_slots: int = 0,
-    ):
+    def __init__(self, cfg: ModelConfig, num_adapter_slots: int = 0, q_low_rank: int | None = None):
         super().__init__()
         if cfg.d_model % cfg.num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
@@ -2562,8 +2479,6 @@ class GroupedQueryAttention(nn.Module):
         self.num_heads = cfg.num_heads
         self.num_kv_heads = cfg.num_kv_heads
         self.head_dim = cfg.d_model // cfg.num_heads
-        self.xsa_window_size = xsa_window_size
-        self.xsa_cache_slots = xsa_cache_slots
         self.rope = RotaryEmbedding(self.head_dim, base=cfg.rope_base)
         resolved_q_low_rank = cfg.q_low_rank if q_low_rank is None else q_low_rank
         attn_fake_quant_during_train = (
@@ -2623,9 +2538,6 @@ class GroupedQueryAttention(nn.Module):
             zero_init=True,
         )
         self.q_gain = nn.Parameter(torch.full((cfg.num_heads,), float(cfg.qk_gain_init)))
-        self.xsa_scale = (
-            nn.Parameter(torch.full((cfg.num_heads,), float(cfg.xsa_scale_init))) if self.xsa_window_size > 0 else None
-        )
         self.dropout = nn.Dropout(cfg.resid_dropout)
 
     def set_global_step(self, step: int) -> None:
@@ -2633,30 +2545,6 @@ class GroupedQueryAttention(nn.Module):
         self.k_proj.set_global_step(step)
         self.v_proj.set_global_step(step)
         self.out_proj.set_global_step(step)
-
-    def xsa_recent_window_cache(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        if self.xsa_window_size <= 0 or self.xsa_cache_slots <= 0:
-            raise RuntimeError("xsa_recent_window_cache called with xsa disabled")
-        bsz, heads, seqlen, head_dim = x.shape
-        pad = (-seqlen) % self.xsa_window_size
-        if pad:
-            x = F.pad(x, (0, 0, 0, pad))
-        num_windows = x.size(2) // self.xsa_window_size
-        window_summary = x.reshape(bsz, heads, num_windows, self.xsa_window_size, head_dim).mean(dim=3)
-        zero_summary = x.new_zeros((bsz, heads, self.xsa_cache_slots, head_dim))
-        padded_summary = torch.cat((zero_summary, window_summary), dim=2)
-        token_windows = torch.arange(seqlen, device=x.device) // self.xsa_window_size
-        cache_offsets = torch.arange(self.xsa_cache_slots, device=x.device)
-        gather_indices = token_windows.unsqueeze(1) + cache_offsets.view(1, -1)
-        source_windows = token_windows.unsqueeze(1) - self.xsa_cache_slots + 1 + cache_offsets.view(1, -1)
-        cache = padded_summary.index_select(2, gather_indices.reshape(-1)).view(
-            bsz,
-            heads,
-            seqlen,
-            self.xsa_cache_slots,
-            head_dim,
-        )
-        return cache, source_windows >= 0
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
         bsz, seqlen, dim = x.shape
@@ -2677,17 +2565,6 @@ class GroupedQueryAttention(nn.Module):
             v = v.repeat_interleave(repeat, dim=1)
 
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
-        if self.xsa_scale is not None and seqlen > self.xsa_window_size:
-            cache_k, cache_valid = self.xsa_recent_window_cache(k)
-            cache_v, _ = self.xsa_recent_window_cache(v)
-            cache_scores = (q.unsqueeze(3) * cache_k).sum(dim=-1) * (self.head_dim ** -0.5)
-            valid_mask = cache_valid.view(1, 1, seqlen, self.xsa_cache_slots)
-            safe_scores = torch.where(valid_mask, cache_scores, torch.full_like(cache_scores, -1e4))
-            cache_weights = torch.softmax(safe_scores, dim=-1)
-            cache_weights = torch.where(valid_mask, cache_weights, torch.zeros_like(cache_weights))
-            cache_weights = cache_weights / cache_weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
-            xsa = (cache_weights.unsqueeze(-1) * cache_v).sum(dim=3)
-            attn = attn + xsa * self.xsa_scale.to(dtype=q.dtype).view(1, -1, 1, 1)
         attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, dim)
         return self.dropout(self.out_proj(attn, slot=slot))
 
@@ -2747,19 +2624,11 @@ class TransformerBlock(nn.Module):
         q_low_rank: int | None = None,
         mlp_fake_quant_during_train: bool | None = None,
         smear_gate: bool = False,
-        xsa_window_size: int = 0,
-        xsa_cache_slots: int = 0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
         self.mlp_norm = RMSNorm(cfg.d_model)
-        self.attn = GroupedQueryAttention(
-            cfg,
-            num_adapter_slots=num_adapter_slots,
-            q_low_rank=q_low_rank,
-            xsa_window_size=xsa_window_size,
-            xsa_cache_slots=xsa_cache_slots,
-        )
+        self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots, q_low_rank=q_low_rank)
         self.mlp = ReLU2MLP(
             cfg,
             num_adapter_slots=num_adapter_slots,
@@ -2847,8 +2716,6 @@ class RecurrentGPT(nn.Module):
                         cfg.final_tail_mlp_fake_quant_during_train if tail_idx == cfg.tail_layers - 1 else None
                     ),
                     smear_gate=cfg.final_tail_smear_gate and tail_idx == cfg.tail_layers - 1,
-                    xsa_window_size=cfg.xsa_window_size if tail_idx >= cfg.tail_layers - cfg.xsa_tail_layers else 0,
-                    xsa_cache_slots=cfg.xsa_cache_slots if tail_idx >= cfg.tail_layers - cfg.xsa_tail_layers else 0,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -3717,22 +3584,6 @@ def validate_config(cfg: TrainConfig) -> None:
                 raise ConfigError("tail_q_low_ranks entries must be >= 0")
             if tail_q_low_rank >= cfg.model.d_model:
                 raise ConfigError("tail_q_low_ranks entries must be smaller than d_model")
-    if cfg.model.xsa_window_size < 0:
-        raise ConfigError("xsa_window_size must be >= 0")
-    if cfg.model.xsa_window_size > cfg.model.seq_len:
-        raise ConfigError("xsa_window_size must be <= seq_len")
-    if cfg.model.xsa_tail_layers < 0:
-        raise ConfigError("xsa_tail_layers must be >= 0")
-    if cfg.model.xsa_tail_layers > cfg.model.tail_layers:
-        raise ConfigError("xsa_tail_layers must be <= tail_layers")
-    if cfg.model.xsa_cache_slots < 0:
-        raise ConfigError("xsa_cache_slots must be >= 0")
-    if cfg.model.xsa_window_size > 0 and cfg.model.xsa_tail_layers <= 0:
-        raise ConfigError("xsa_window_size requires xsa_tail_layers > 0")
-    if cfg.model.xsa_tail_layers > 0 and cfg.model.xsa_window_size == 0:
-        raise ConfigError("xsa_tail_layers requires xsa_window_size > 0")
-    if cfg.model.xsa_window_size > 0 and cfg.model.xsa_cache_slots <= 0:
-        raise ConfigError("xsa_window_size requires xsa_cache_slots > 0")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
@@ -4634,7 +4485,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     trade_one_four_block_layer_for_three_wider_unique_blocks(cfg)
     front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg)
     move_full_rank_q_anchor_to_widest_three_block_tail(cfg)
-    add_recent_window_tail_cache_on_three_block_carrier(cfg)
     return cfg
 
 
