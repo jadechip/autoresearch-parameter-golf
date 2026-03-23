@@ -107,9 +107,6 @@ class ModelConfig:
     shared_q_low_rank: int | None = None
     final_tail_q_low_rank: int | None = None
     final_tail_smear_gate: bool = False
-    tail_local_token_rank: int = 0
-    tail_local_token_window: int = 0
-    tail_local_token_block_index: int = -1
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -1545,74 +1542,6 @@ def front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg: TrainConfig) 
     )
 
 
-def add_two_scale_local_mixer_on_first_tail_of_front_loaded_three_block_carrier(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
-        return
-    expected_tail_bonuses = (
-        model_cfg.non_recurrent_mlp_hidden_bonus + model_cfg.d_model // 2,
-        model_cfg.non_recurrent_mlp_hidden_bonus,
-        model_cfg.non_recurrent_mlp_hidden_bonus - model_cfg.d_model // 2,
-    )
-    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank != 0:
-        return
-    if model_cfg.tail_local_token_rank != 0 or model_cfg.tail_local_token_window != 0 or model_cfg.tail_local_token_block_index != -1:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.2.mlp.",
-        "tail.2.attn.q_proj.weight",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    model_cfg.tail_local_token_rank = model_cfg.d_model // 32
-    model_cfg.tail_local_token_window = 4
-    model_cfg.tail_local_token_block_index = 0
-
-
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -2609,60 +2538,6 @@ class ReLU2MLP(nn.Module):
         return self.dropout(self.proj(x, slot=slot))
 
 
-class TwoScaleLocalTokenMixer(nn.Module):
-    def __init__(self, cfg: ModelConfig, *, rank: int, window: int):
-        super().__init__()
-        if rank <= 0:
-            raise ValueError(f"tail local token rank must be positive, got {rank}")
-        if window < 2:
-            raise ValueError(f"tail local token window must be >= 2, got {window}")
-        self.window = window
-        self.norm = RMSNorm(cfg.d_model)
-        self.down_proj = FakeQuantLinear(
-            cfg.d_model,
-            rank,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-        )
-        self.out_proj = FakeQuantLinear(
-            rank * 2,
-            cfg.d_model,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-            zero_init=True,
-        )
-
-    def set_global_step(self, step: int) -> None:
-        self.down_proj.set_global_step(step)
-        self.out_proj.set_global_step(step)
-
-    def _shift(self, x: Tensor, offset: int) -> Tensor:
-        if offset <= 0:
-            return x
-        if x.size(1) <= offset:
-            return torch.zeros_like(x)
-        return torch.cat((torch.zeros_like(x[:, :offset]), x[:, :-offset]), dim=1)
-
-    def _causal_window_mean(self, x: Tensor) -> Tensor:
-        if x.size(1) <= 1:
-            return torch.zeros_like(x)
-        prefix = F.pad(x.cumsum(dim=1), (0, 0, 1, 0))
-        positions = torch.arange(x.size(1), device=x.device)
-        starts = torch.clamp(positions - self.window, min=0)
-        window_sums = prefix[:, positions, :] - prefix[:, starts, :]
-        counts = (positions - starts).to(dtype=x.dtype).view(1, -1, 1)
-        safe_counts = counts.clamp_min(1.0)
-        return torch.where(counts > 0, window_sums / safe_counts, torch.zeros_like(window_sums))
-
-    def forward(self, x: Tensor) -> Tensor:
-        hidden = self.down_proj(self.norm(x))
-        prev_token = self._shift(hidden, 1)
-        short_context = self._causal_window_mean(hidden)
-        return self.out_proj(torch.cat((prev_token, short_context), dim=-1))
-
-
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -2672,8 +2547,6 @@ class TransformerBlock(nn.Module):
         q_low_rank: int | None = None,
         mlp_fake_quant_during_train: bool | None = None,
         smear_gate: bool = False,
-        tail_local_token_rank: int = 0,
-        tail_local_token_window: int = 0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
@@ -2689,18 +2562,10 @@ class TransformerBlock(nn.Module):
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
         self.smear_scale = nn.Parameter(torch.zeros(scale_shape)) if smear_gate else None
-        self.local_mixer = (
-            TwoScaleLocalTokenMixer(cfg, rank=tail_local_token_rank, window=tail_local_token_window)
-            if tail_local_token_rank > 0
-            else None
-        )
-        self.local_scale = nn.Parameter(torch.ones(scale_shape)) if self.local_mixer is not None else None
 
     def set_global_step(self, step: int) -> None:
         self.attn.set_global_step(step)
         self.mlp.set_global_step(step)
-        if self.local_mixer is not None:
-            self.local_mixer.set_global_step(step)
 
     def residual_scale(self, scale: nn.Parameter, x: Tensor, slot: int | None) -> Tensor:
         if scale.ndim == 2:
@@ -2723,8 +2588,6 @@ class TransformerBlock(nn.Module):
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         if self.smear_scale is not None:
             x = x + self.causal_smear(x) * self.residual_scale(self.smear_scale, x, slot)
-        if self.local_mixer is not None and self.local_scale is not None:
-            x = x + self.local_mixer(x) * self.residual_scale(self.local_scale, x, slot)
         return x
 
 
@@ -2771,12 +2634,6 @@ class RecurrentGPT(nn.Module):
                         cfg.final_tail_mlp_fake_quant_during_train if tail_idx == cfg.tail_layers - 1 else None
                     ),
                     smear_gate=cfg.final_tail_smear_gate and tail_idx == cfg.tail_layers - 1,
-                    tail_local_token_rank=(
-                        cfg.tail_local_token_rank if tail_idx == cfg.tail_local_token_block_index else 0
-                    ),
-                    tail_local_token_window=(
-                        cfg.tail_local_token_window if tail_idx == cfg.tail_local_token_block_index else 0
-                    ),
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -3637,20 +3494,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
-    if cfg.model.tail_local_token_rank < 0:
-        raise ConfigError("tail_local_token_rank must be >= 0")
-    if cfg.model.tail_local_token_window < 0:
-        raise ConfigError("tail_local_token_window must be >= 0")
-    if cfg.model.tail_local_token_rank == 0:
-        if cfg.model.tail_local_token_window != 0:
-            raise ConfigError("tail_local_token_window must be 0 when tail_local_token_rank is disabled")
-        if cfg.model.tail_local_token_block_index != -1:
-            raise ConfigError("tail_local_token_block_index must be -1 when tail_local_token_rank is disabled")
-    else:
-        if cfg.model.tail_local_token_window < 2:
-            raise ConfigError("tail_local_token_window must be >= 2 when tail_local_token_rank is enabled")
-        if cfg.model.tail_local_token_block_index < 0 or cfg.model.tail_local_token_block_index >= cfg.model.tail_layers:
-            raise ConfigError("tail_local_token_block_index must point at a valid tail block when enabled")
     if cfg.grad_accum_steps <= 0:
         raise ConfigError("grad_accum_steps must be positive")
     if cfg.train_seq_len_min is not None and cfg.train_seq_len_min <= 0:
@@ -4551,7 +4394,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     flatten_near_cap_carrier_into_four_unique_blocks(cfg)
     trade_one_four_block_layer_for_three_wider_unique_blocks(cfg)
     front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg)
-    add_two_scale_local_mixer_on_first_tail_of_front_loaded_three_block_carrier(cfg)
     return cfg
 
 
