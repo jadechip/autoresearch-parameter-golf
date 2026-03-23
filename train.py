@@ -109,7 +109,6 @@ class ModelConfig:
     tail_q_low_ranks: tuple[int, ...] | None = None
     final_tail_smear_gate: bool = False
     final_tail_neighbor_mixer: bool = False
-    tail_bigram_ranks: tuple[int, ...] | None = None
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -327,8 +326,6 @@ def train_config_from_dict(data: Mapping[str, Any]) -> TrainConfig:
             model_payload["tail_mlp_hidden_bonuses"] = tuple(model_payload["tail_mlp_hidden_bonuses"])
         if "tail_q_low_ranks" in model_payload and isinstance(model_payload["tail_q_low_ranks"], list):
             model_payload["tail_q_low_ranks"] = tuple(model_payload["tail_q_low_ranks"])
-        if "tail_bigram_ranks" in model_payload and isinstance(model_payload["tail_bigram_ranks"], list):
-            model_payload["tail_bigram_ranks"] = tuple(model_payload["tail_bigram_ranks"])
         cfg.model = ModelConfig(**model_payload)
     if "optim" in payload:
         cfg.optim = OptimConfig(**dict(payload["optim"]))
@@ -2045,84 +2042,6 @@ def move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg: Tra
     )
 
 
-def replace_branch_tip_neighbor_with_penultimate_factorized_bigram(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if not model_cfg.final_tail_neighbor_mixer or model_cfg.final_tail_smear_gate or not model_cfg.tie_embeddings:
-        return
-    if model_cfg.tail_bigram_ranks is not None:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
-        return
-    expected_tail_bonuses = (
-        model_cfg.d_model * 8,
-        model_cfg.d_model * 7,
-        model_cfg.d_model * 49 // 8,
-    )
-    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank is not None:
-        return
-    if model_cfg.tail_q_low_ranks != (0, model_cfg.q_low_rank, model_cfg.d_model // 8):
-        return
-    if model_cfg.penultimate_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.2.mlp.",
-        "tail.2.attn.q_proj.down_proj.weight",
-        "tail.2.attn.q_proj.up_proj.weight",
-        "tail.2.attn.out_proj.weight",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    model_cfg.final_tail_neighbor_mixer = False
-    model_cfg.tail_bigram_ranks = (0, model_cfg.d_model // 8, 0)
-    model_cfg.tail_mlp_hidden_bonuses = (
-        expected_tail_bonuses[0],
-        expected_tail_bonuses[1] - model_cfg.d_model // 8,
-        expected_tail_bonuses[2],
-    )
-
-
 def reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if not model_cfg.final_tail_neighbor_mixer or not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
@@ -3203,39 +3122,6 @@ class ReLU2MLP(nn.Module):
         return self.dropout(self.proj(x, slot=slot))
 
 
-class FactorizedCausalBigram(nn.Module):
-    def __init__(self, cfg: ModelConfig, *, rank: int):
-        super().__init__()
-        self.norm = RMSNorm(cfg.d_model)
-        self.down_proj = FakeQuantLinear(
-            cfg.d_model,
-            rank,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-        )
-        self.up_proj = FakeQuantLinear(
-            rank,
-            cfg.d_model,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-            zero_init=True,
-        )
-
-    def set_global_step(self, step: int) -> None:
-        self.down_proj.set_global_step(step)
-        self.up_proj.set_global_step(step)
-
-    def forward(self, x: Tensor) -> Tensor:
-        if x.size(1) <= 1:
-            return torch.zeros_like(x)
-        prev = torch.cat((torch.zeros_like(x[:, :1]), self.norm(x[:, :-1])), dim=1)
-        prev = torch.relu(self.down_proj(prev))
-        prev = prev.square()
-        return self.up_proj(prev)
-
-
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -3246,7 +3132,6 @@ class TransformerBlock(nn.Module):
         mlp_fake_quant_during_train: bool | None = None,
         smear_gate: bool = False,
         neighbor_mixer: bool = False,
-        bigram_rank: int = 0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
@@ -3262,16 +3147,12 @@ class TransformerBlock(nn.Module):
         self.attn_scale = nn.Parameter(torch.ones(scale_shape))
         self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
         self.smear_scale = nn.Parameter(torch.zeros(scale_shape)) if smear_gate else None
-        self.bigram = FactorizedCausalBigram(cfg, rank=bigram_rank) if bigram_rank > 0 else None
-        self.bigram_scale = nn.Parameter(torch.ones(scale_shape)) if bigram_rank > 0 else None
         self.neighbor_norm = RMSNorm(cfg.d_model) if neighbor_mixer else None
         self.neighbor_scale = nn.Parameter(torch.zeros(scale_shape)) if neighbor_mixer else None
 
     def set_global_step(self, step: int) -> None:
         self.attn.set_global_step(step)
         self.mlp.set_global_step(step)
-        if self.bigram is not None:
-            self.bigram.set_global_step(step)
 
     def residual_scale(self, scale: nn.Parameter, x: Tensor, slot: int | None) -> Tensor:
         if scale.ndim == 2:
@@ -3299,9 +3180,6 @@ class TransformerBlock(nn.Module):
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
         if self.smear_scale is not None:
             x = x + self.causal_smear(x) * self.residual_scale(self.smear_scale, x, slot)
-        if self.bigram_scale is not None:
-            assert self.bigram is not None
-            x = x + self.bigram(x) * self.residual_scale(self.bigram_scale, x, slot)
         if self.neighbor_scale is not None:
             assert self.neighbor_norm is not None
             x = x + self.causal_neighbor(self.neighbor_norm(x)) * self.residual_scale(self.neighbor_scale, x, slot)
@@ -3324,9 +3202,6 @@ class RecurrentGPT(nn.Module):
         tail_q_low_ranks = cfg.tail_q_low_ranks
         if tail_q_low_ranks is not None and len(tail_q_low_ranks) != cfg.tail_layers:
             raise ConfigError("tail_q_low_ranks must have exactly one entry per tail layer")
-        tail_bigram_ranks = cfg.tail_bigram_ranks
-        if tail_bigram_ranks is not None and len(tail_bigram_ranks) != cfg.tail_layers:
-            raise ConfigError("tail_bigram_ranks must have exactly one entry per tail layer")
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.emb_norm = RMSNorm(cfg.d_model)
         self.stem = nn.ModuleList(
@@ -3366,7 +3241,6 @@ class RecurrentGPT(nn.Module):
                     ),
                     smear_gate=cfg.final_tail_smear_gate and tail_idx == cfg.tail_layers - 1,
                     neighbor_mixer=cfg.final_tail_neighbor_mixer and tail_idx == cfg.tail_layers - 1,
-                    bigram_rank=tail_bigram_ranks[tail_idx] if tail_bigram_ranks is not None else 0,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -3860,8 +3734,6 @@ def load_model_from_artifact(path: str | Path, device: torch.device) -> tuple[Re
         model_payload["tail_mlp_hidden_bonuses"] = tuple(model_payload["tail_mlp_hidden_bonuses"])
     if "tail_q_low_ranks" in model_payload and isinstance(model_payload["tail_q_low_ranks"], list):
         model_payload["tail_q_low_ranks"] = tuple(model_payload["tail_q_low_ranks"])
-    if "tail_bigram_ranks" in model_payload and isinstance(model_payload["tail_bigram_ranks"], list):
-        model_payload["tail_bigram_ranks"] = tuple(model_payload["tail_bigram_ranks"])
     model = RecurrentGPT(ModelConfig(**model_payload)).to(device)
     payload = unpack_quantized_payload(blob)
     state_dict = dequantize_state_dict_int8(payload)
@@ -4241,20 +4113,8 @@ def validate_config(cfg: TrainConfig) -> None:
                 raise ConfigError("tail_q_low_ranks entries must be >= 0")
             if rank >= cfg.model.d_model:
                 raise ConfigError("tail_q_low_ranks entries must be smaller than d_model")
-    if cfg.model.tail_bigram_ranks is not None:
-        if len(cfg.model.tail_bigram_ranks) != cfg.model.tail_layers:
-            raise ConfigError("tail_bigram_ranks must have exactly one entry per tail layer")
-        for rank in cfg.model.tail_bigram_ranks:
-            if rank < 0:
-                raise ConfigError("tail_bigram_ranks entries must be >= 0")
-            if rank >= cfg.model.d_model:
-                raise ConfigError("tail_bigram_ranks entries must be smaller than d_model")
     if cfg.model.final_tail_smear_gate and cfg.model.final_tail_neighbor_mixer:
         raise ConfigError("final_tail_smear_gate and final_tail_neighbor_mixer cannot both be enabled")
-    if cfg.model.final_tail_neighbor_mixer and cfg.model.tail_bigram_ranks is not None and any(
-        rank > 0 for rank in cfg.model.tail_bigram_ranks
-    ):
-        raise ConfigError("final_tail_neighbor_mixer cannot be combined with tail_bigram_ranks")
     if cfg.model.penultimate_tail_mlp_fake_quant_during_train is not None and cfg.model.tail_layers < 2:
         raise ConfigError("penultimate_tail_mlp_fake_quant_during_train requires at least 2 tail layers")
     if cfg.grad_accum_steps <= 0:
@@ -5164,7 +5024,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg)
     front_load_tail_width_on_branch_tip_neighbor_carrier(cfg)
     move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg)
-    replace_branch_tip_neighbor_with_penultimate_factorized_bigram(cfg)
     reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg)
     return cfg
 
