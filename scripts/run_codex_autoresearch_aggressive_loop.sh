@@ -77,6 +77,11 @@ log_error() {
   printf '%s\n' "$line" | tee -a "$ERRORS_LOG" >&2
 }
 
+campaign_status() {
+  "$PYTHON_BIN" "$CAMPAIGN_BIN" --state_dir "$STATE_DIR" show \
+    | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["status"])'
+}
+
 ensure_ready() {
   while true; do
     if "$PYTHON_BIN" "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" require-ready >/dev/null 2>&1 \
@@ -147,9 +152,21 @@ log_activity "aggressive_codex_loop_start prompt_file=$PROMPT_FILE max_iteration
 
 iteration=0
 while true; do
-  if ! "$PYTHON_BIN" "$CAMPAIGN_BIN" --state_dir "$STATE_DIR" require-active >/dev/null 2>&1; then
+  set +e
+  current_campaign_status="$(campaign_status 2>/dev/null)"
+  campaign_status_code=$?
+  set -e
+  if [[ $campaign_status_code -ne 0 ]]; then
+    log_error "aggressive_campaign_status_failed iterations=$iteration"
+    exit $campaign_status_code
+  fi
+  if [[ "$current_campaign_status" == "completed" ]]; then
     log_activity "aggressive_campaign_complete iterations=$iteration"
     break
+  fi
+  if [[ "$current_campaign_status" != "active" ]]; then
+    log_error "aggressive_campaign_unexpected_status iterations=$iteration status=$current_campaign_status"
+    exit 1
   fi
 
   if [[ "$MAX_ITERATIONS" != "0" && "$iteration" -ge "$MAX_ITERATIONS" ]]; then
