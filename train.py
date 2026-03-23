@@ -1540,7 +1540,7 @@ def front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg: TrainConfig) 
         model_cfg.non_recurrent_mlp_hidden_bonus,
         model_cfg.non_recurrent_mlp_hidden_bonus - half_step,
     )
-def keep_final_attention_kv_float_on_full_context_three_block_carrier(cfg: TrainConfig) -> None:
+def start_full_context_and_shrink_batch_on_three_block_near_cap_carrier(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
         return
@@ -1578,9 +1578,9 @@ def keep_final_attention_kv_float_on_full_context_three_block_carrier(cfg: Train
         return
     if cfg.grad_accum_steps != 2:
         return
-    if cfg.train_batch_tokens != 49_152 or cfg.val_batch_tokens != 122_880:
+    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
         return
-    if cfg.train_seq_len_min != model_cfg.seq_len or cfg.train_seq_len_warmup_steps != 160:
+    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
         return
     if cfg.optim.warmdown_steps != 80:
         return
@@ -1602,9 +1602,10 @@ def keep_final_attention_kv_float_on_full_context_three_block_carrier(cfg: Train
         return
     if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
         return
-    cfg.quant.keep_float_name_patterns = tuple(
-        dict.fromkeys((*cfg.quant.keep_float_name_patterns, "tail.2.attn.k_proj.weight", "tail.2.attn.v_proj.weight"))
-    )
+    cfg.train_batch_tokens = 49_152
+    cfg.train_seq_len_min = model_cfg.seq_len
+
+
 def _dict_without_keys(data: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
@@ -4457,7 +4458,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     flatten_near_cap_carrier_into_four_unique_blocks(cfg)
     trade_one_four_block_layer_for_three_wider_unique_blocks(cfg)
     front_load_tail_mlp_width_on_three_block_near_cap_carrier(cfg)
-    keep_final_attention_kv_float_on_full_context_three_block_carrier(cfg)
+    start_full_context_and_shrink_batch_on_three_block_near_cap_carrier(cfg)
     return cfg
 
 
