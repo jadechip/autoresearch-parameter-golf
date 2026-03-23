@@ -109,7 +109,6 @@ class ModelConfig:
     tail_q_low_ranks: tuple[int, ...] | None = None
     final_tail_smear_gate: bool = False
     final_tail_neighbor_mixer: bool = False
-    final_tail_ttt_rank: int = 0
     fake_quant_during_train: bool = True
     attn_fake_quant_during_train: bool | None = None
     shared_mlp_fake_quant_during_train: bool | None = None
@@ -2043,84 +2042,6 @@ def move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg: Tra
     )
 
 
-def swap_final_tail_neighbor_for_causal_ttt_on_branch_tip_carrier(cfg: TrainConfig) -> None:
-    model_cfg = cfg.model
-    if model_cfg.final_tail_ttt_rank > 0 or not model_cfg.final_tail_neighbor_mixer or model_cfg.final_tail_smear_gate:
-        return
-    if not model_cfg.tie_embeddings:
-        return
-    if model_cfg.stem_layers != 0 or model_cfg.shared_layers != 0 or model_cfg.recurrence_loops != 0 or model_cfg.tail_layers != 3:
-        return
-    if model_cfg.mlp_mult != 2 or model_cfg.shared_mlp_hidden_bonus != 0:
-        return
-    if model_cfg.non_recurrent_mlp_hidden_bonus != model_cfg.d_model * 7:
-        return
-    expected_tail_bonuses = (
-        model_cfg.d_model * 8,
-        model_cfg.d_model * 7,
-        model_cfg.d_model * 49 // 8,
-    )
-    if model_cfg.tail_mlp_hidden_bonuses != expected_tail_bonuses:
-        return
-    if model_cfg.q_low_rank != model_cfg.d_model // 4:
-        return
-    if model_cfg.shared_q_low_rank is not None or model_cfg.final_tail_q_low_rank is not None:
-        return
-    expected_tail_q_ranks = (
-        0,
-        model_cfg.d_model // 4,
-        model_cfg.d_model // 8,
-    )
-    if model_cfg.tail_q_low_ranks != expected_tail_q_ranks:
-        return
-    if model_cfg.penultimate_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.final_tail_mlp_fake_quant_during_train is not False:
-        return
-    if model_cfg.shared_mlp_fake_quant_during_train is not None:
-        return
-    if model_cfg.attn_fake_quant_during_train is not False or not model_cfg.fake_quant_during_train:
-        return
-    if model_cfg.adapter_rank != 8 or tuple(model_cfg.adapter_targets) != ALLOWED_ADAPTER_TARGETS:
-        return
-    if not math.isclose(model_cfg.adapter_alpha, 16.0, rel_tol=0.0, abs_tol=1e-9):
-        return
-    if model_cfg.fake_quant_start_step != cfg.train_seq_len_warmup_steps:
-        return
-    if model_cfg.seq_len != 768:
-        return
-    if cfg.grad_accum_steps != 2:
-        return
-    if cfg.train_batch_tokens != 61_440 or cfg.val_batch_tokens != 122_880:
-        return
-    if cfg.train_seq_len_min != 640 or cfg.train_seq_len_warmup_steps != 160:
-        return
-    if cfg.optim.warmdown_steps != 80:
-        return
-    if cfg.quant.low_bit_bits != 6:
-        return
-    if tuple(cfg.quant.low_bit_name_patterns) != ("mlp.fc.weight", "mlp.proj.weight"):
-        return
-    expected_keep_float_patterns = (
-        "norm",
-        "scale",
-        "gain",
-        "adapter",
-        "lm_head",
-        "tok_emb.weight",
-        "tail.2.mlp.",
-        "tail.2.attn.q_proj.down_proj.weight",
-        "tail.2.attn.q_proj.up_proj.weight",
-        "tail.2.attn.out_proj.weight",
-    )
-    if tuple(cfg.quant.keep_float_name_patterns) != expected_keep_float_patterns:
-        return
-    if not math.isclose(cfg.quant.clip_percentile, 96.5, rel_tol=0.0, abs_tol=1e-9):
-        return
-    model_cfg.final_tail_neighbor_mixer = False
-    model_cfg.final_tail_ttt_rank = model_cfg.d_model // 32
-
-
 def reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg: TrainConfig) -> None:
     model_cfg = cfg.model
     if not model_cfg.final_tail_neighbor_mixer or not model_cfg.tie_embeddings or model_cfg.final_tail_smear_gate:
@@ -3211,7 +3132,6 @@ class TransformerBlock(nn.Module):
         mlp_fake_quant_during_train: bool | None = None,
         smear_gate: bool = False,
         neighbor_mixer: bool = False,
-        ttt_rank: int = 0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.d_model)
@@ -3229,46 +3149,10 @@ class TransformerBlock(nn.Module):
         self.smear_scale = nn.Parameter(torch.zeros(scale_shape)) if smear_gate else None
         self.neighbor_norm = RMSNorm(cfg.d_model) if neighbor_mixer else None
         self.neighbor_scale = nn.Parameter(torch.zeros(scale_shape)) if neighbor_mixer else None
-        self.ttt_norm = RMSNorm(cfg.d_model) if ttt_rank > 0 else None
-        self.ttt_q_proj = FakeQuantLinear(
-            cfg.d_model,
-            ttt_rank,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-        ) if ttt_rank > 0 else None
-        self.ttt_k_proj = FakeQuantLinear(
-            cfg.d_model,
-            ttt_rank,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-        ) if ttt_rank > 0 else None
-        self.ttt_v_proj = FakeQuantLinear(
-            cfg.d_model,
-            ttt_rank,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-        ) if ttt_rank > 0 else None
-        self.ttt_out_proj = FakeQuantLinear(
-            ttt_rank,
-            cfg.d_model,
-            bias=False,
-            fake_quant_during_train=cfg.fake_quant_during_train,
-            fake_quant_start_step=cfg.fake_quant_start_step,
-            zero_init=True,
-        ) if ttt_rank > 0 else None
-        self.ttt_scale = nn.Parameter(torch.ones(scale_shape)) if ttt_rank > 0 else None
 
     def set_global_step(self, step: int) -> None:
         self.attn.set_global_step(step)
         self.mlp.set_global_step(step)
-        if self.ttt_q_proj is not None:
-            self.ttt_q_proj.set_global_step(step)
-            self.ttt_k_proj.set_global_step(step)
-            self.ttt_v_proj.set_global_step(step)
-            self.ttt_out_proj.set_global_step(step)
 
     def residual_scale(self, scale: nn.Parameter, x: Tensor, slot: int | None) -> Tensor:
         if scale.ndim == 2:
@@ -3291,22 +3175,6 @@ class TransformerBlock(nn.Module):
             return torch.zeros_like(x)
         return torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
 
-    def causal_ttt(self, x: Tensor) -> Tensor:
-        if x.size(1) <= 1:
-            return torch.zeros_like(x)
-        assert self.ttt_q_proj is not None
-        assert self.ttt_k_proj is not None
-        assert self.ttt_v_proj is not None
-        assert self.ttt_out_proj is not None
-        q = F.normalize(self.ttt_q_proj(x), dim=-1, eps=1e-6)
-        k = F.normalize(self.ttt_k_proj(x), dim=-1, eps=1e-6)
-        v = torch.tanh(self.ttt_v_proj(x))
-        updates = torch.einsum("bti,btj->btij", v, k)
-        prefix_memory = torch.cumsum(updates, dim=1) - updates
-        counts = torch.arange(x.size(1), device=x.device, dtype=x.dtype).view(1, -1, 1, 1).clamp_min(1.0)
-        mixed = torch.einsum("btij,btj->bti", prefix_memory / counts, q)
-        return self.ttt_out_proj(mixed)
-
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
         x = x + self.attn(self.attn_norm(x), slot=slot) * self.residual_scale(self.attn_scale, x, slot)
         x = x + self.mlp(self.mlp_norm(x), slot=slot) * self.residual_scale(self.mlp_scale, x, slot)
@@ -3315,9 +3183,6 @@ class TransformerBlock(nn.Module):
         if self.neighbor_scale is not None:
             assert self.neighbor_norm is not None
             x = x + self.causal_neighbor(self.neighbor_norm(x)) * self.residual_scale(self.neighbor_scale, x, slot)
-        if self.ttt_scale is not None:
-            assert self.ttt_norm is not None
-            x = x + self.causal_ttt(self.ttt_norm(x)) * self.residual_scale(self.ttt_scale, x, slot)
         return x
 
 
@@ -3376,7 +3241,6 @@ class RecurrentGPT(nn.Module):
                     ),
                     smear_gate=cfg.final_tail_smear_gate and tail_idx == cfg.tail_layers - 1,
                     neighbor_mixer=cfg.final_tail_neighbor_mixer and tail_idx == cfg.tail_layers - 1,
-                    ttt_rank=cfg.final_tail_ttt_rank if tail_idx == cfg.tail_layers - 1 else 0,
                 )
                 for tail_idx in range(cfg.tail_layers)
             ]
@@ -4239,10 +4103,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("final_tail_q_low_rank must be >= 0 when set")
     if cfg.model.final_tail_q_low_rank is not None and cfg.model.final_tail_q_low_rank >= cfg.model.d_model:
         raise ConfigError("final_tail_q_low_rank must be smaller than d_model when set")
-    if cfg.model.final_tail_ttt_rank < 0:
-        raise ConfigError("final_tail_ttt_rank must be >= 0")
-    if cfg.model.final_tail_ttt_rank >= cfg.model.d_model:
-        raise ConfigError("final_tail_ttt_rank must be smaller than d_model")
     if cfg.model.tail_q_low_ranks is not None:
         if cfg.model.final_tail_q_low_rank is not None:
             raise ConfigError("tail_q_low_ranks cannot be combined with final_tail_q_low_rank")
@@ -4253,15 +4113,8 @@ def validate_config(cfg: TrainConfig) -> None:
                 raise ConfigError("tail_q_low_ranks entries must be >= 0")
             if rank >= cfg.model.d_model:
                 raise ConfigError("tail_q_low_ranks entries must be smaller than d_model")
-    enabled_final_tail_local_modules = sum(
-        (
-            bool(cfg.model.final_tail_smear_gate),
-            bool(cfg.model.final_tail_neighbor_mixer),
-            cfg.model.final_tail_ttt_rank > 0,
-        )
-    )
-    if enabled_final_tail_local_modules > 1:
-        raise ConfigError("only one final-tail local module may be enabled at a time")
+    if cfg.model.final_tail_smear_gate and cfg.model.final_tail_neighbor_mixer:
+        raise ConfigError("final_tail_smear_gate and final_tail_neighbor_mixer cannot both be enabled")
     if cfg.model.penultimate_tail_mlp_fake_quant_during_train is not None and cfg.model.tail_layers < 2:
         raise ConfigError("penultimate_tail_mlp_fake_quant_during_train requires at least 2 tail layers")
     if cfg.grad_accum_steps <= 0:
@@ -5171,7 +5024,6 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
     add_final_tail_neighbor_mixer_on_branch_tip_three_block_carrier(cfg)
     front_load_tail_width_on_branch_tip_neighbor_carrier(cfg)
     move_full_rank_q_forward_and_compress_final_q_on_branch_tip_carrier(cfg)
-    swap_final_tail_neighbor_for_causal_ttt_on_branch_tip_carrier(cfg)
     reallocate_tail_q_budget_into_four_block_depth_on_branch_tip_carrier(cfg)
     return cfg
 
