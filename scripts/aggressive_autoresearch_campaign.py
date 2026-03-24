@@ -11,6 +11,19 @@ from train import atomic_write_json, load_and_validate_results
 
 CAMPAIGN_SCHEMA_VERSION = "pgolf.aggressive_campaign.v1"
 
+DEFAULT_RANKING_POLICY = {
+    "artifact_bytes_hard_max": 16_000_000,
+    "training_seconds_min_ratio": 0.70,
+    "training_seconds_max_ratio": 1.40,
+    "contender_bpb_gap": 0.015,
+    "poor_bpb_gap": 0.025,
+    "catastrophic_bpb_gap": 0.050,
+    "min_attempts_before_early_stop": 2,
+    "max_invalid_attempts_before_early_stop": 2,
+    "max_catastrophic_attempts_before_early_stop": 2,
+    "max_noncontender_attempts_before_early_stop": 4,
+}
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -26,6 +39,30 @@ def campaign_path(state_dir: Path) -> Path:
 
 def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def session_path(state_dir: Path) -> Path:
+    return state_dir / "session.json"
+
+
+def normalize_ranking_policy(raw: Any) -> dict[str, Any]:
+    payload = dict(DEFAULT_RANKING_POLICY)
+    if isinstance(raw, dict):
+        for key in payload:
+            if key in raw:
+                payload[key] = raw[key]
+    return {
+        "artifact_bytes_hard_max": int(payload["artifact_bytes_hard_max"]),
+        "training_seconds_min_ratio": float(payload["training_seconds_min_ratio"]),
+        "training_seconds_max_ratio": float(payload["training_seconds_max_ratio"]),
+        "contender_bpb_gap": float(payload["contender_bpb_gap"]),
+        "poor_bpb_gap": float(payload["poor_bpb_gap"]),
+        "catastrophic_bpb_gap": float(payload["catastrophic_bpb_gap"]),
+        "min_attempts_before_early_stop": int(payload["min_attempts_before_early_stop"]),
+        "max_invalid_attempts_before_early_stop": int(payload["max_invalid_attempts_before_early_stop"]),
+        "max_catastrophic_attempts_before_early_stop": int(payload["max_catastrophic_attempts_before_early_stop"]),
+        "max_noncontender_attempts_before_early_stop": int(payload["max_noncontender_attempts_before_early_stop"]),
+    }
 
 
 def normalize_blueprint(raw: Any, index: int) -> dict[str, Any]:
@@ -58,12 +95,20 @@ def hydrate_campaign_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
 
     source = load_json(ideas_json_path)
+    changed = False
+    desired_ranking_policy = normalize_ranking_policy(source.get("ranking_policy"))
+    desired_default_regime = dict(source.get("campaign_default_regime", {}))
+    if payload.get("ranking_policy") != desired_ranking_policy:
+        payload["ranking_policy"] = desired_ranking_policy
+        changed = True
+    if payload.get("campaign_default_regime") != desired_default_regime:
+        payload["campaign_default_regime"] = desired_default_regime
+        changed = True
     source_ideas = {
         str(item["id"]): item
         for item in source.get("ideas", [])
         if isinstance(item, dict) and item.get("id") is not None
     }
-    changed = False
     for idea in payload.get("ideas", []):
         source_idea = source_ideas.get(str(idea.get("id")))
         if source_idea is None:
@@ -127,6 +172,8 @@ def load_campaign(state_dir: Path) -> dict[str, Any]:
     if payload.get("schema_version") != CAMPAIGN_SCHEMA_VERSION:
         raise ValueError(f"unexpected aggressive campaign schema: {payload.get('schema_version')}")
     payload = hydrate_campaign_metadata(payload)
+    payload = recompute_campaign_rollups(state_dir, payload)
+    refresh_status(payload)
     return payload
 
 
@@ -152,24 +199,40 @@ def normalize_idea(raw: dict[str, Any], attempts_allowed: int) -> dict[str, Any]
         "attempts_allowed": resolved_attempts_allowed,
         "attempts_used": 0,
         "accepted_attempts": 0,
+        "accepted_valid_attempts": 0,
+        "accepted_invalid_attempts": 0,
         "best_val_bpb": None,
         "best_run_id": None,
+        "best_observed_val_bpb": None,
+        "best_observed_run_id": None,
+        "best_valid_val_bpb": None,
+        "best_valid_run_id": None,
+        "valid_attempts": 0,
+        "invalid_attempts": 0,
+        "catastrophic_attempts": 0,
+        "contender_attempts": 0,
+        "pareto_frontier": [],
+        "early_stop_reason": None,
         "attempts": [],
     }
+
+
+def idea_is_done(idea: dict[str, Any]) -> bool:
+    return idea.get("early_stop_reason") is not None or idea["attempts_used"] >= idea["attempts_allowed"]
 
 
 def set_current_idea(campaign: dict[str, Any], index: int | None) -> None:
     campaign["current_idea_index"] = index
     for i, idea in enumerate(campaign["ideas"]):
         if index is None:
-            idea["status"] = "completed" if idea["attempts_used"] >= idea["attempts_allowed"] else idea["status"]
+            idea["status"] = "completed" if idea_is_done(idea) else idea["status"]
             continue
         if i < index:
             idea["status"] = "completed"
         elif i == index:
             idea["status"] = "active"
         else:
-            if idea["attempts_used"] >= idea["attempts_allowed"]:
+            if idea_is_done(idea):
                 idea["status"] = "completed"
             else:
                 idea["status"] = "pending"
@@ -188,7 +251,7 @@ def current_idea(campaign: dict[str, Any]) -> dict[str, Any] | None:
 def refresh_status(campaign: dict[str, Any]) -> None:
     ideas = campaign["ideas"]
     index = campaign.get("current_idea_index")
-    while index is not None and index < len(ideas) and ideas[index]["attempts_used"] >= ideas[index]["attempts_allowed"]:
+    while index is not None and index < len(ideas) and idea_is_done(ideas[index]):
         ideas[index]["status"] = "completed"
         index += 1
     if index is None or index >= len(ideas):
@@ -218,6 +281,8 @@ def init_campaign(state_dir: Path, ideas_json: Path, tries_per_idea: int, force:
         "state_dir": str(state_dir),
         "ideas_json": str(ideas_json),
         "tries_per_idea_default": tries_per_idea,
+        "ranking_policy": normalize_ranking_policy(ideas_payload.get("ranking_policy")),
+        "campaign_default_regime": dict(ideas_payload.get("campaign_default_regime", {})),
         "status": "active",
         "current_idea_index": 0,
         "ideas": ideas,
@@ -232,6 +297,344 @@ def require_active(state_dir: Path) -> dict[str, Any]:
     if payload.get("status") != "active" or current_idea(payload) is None:
         raise ValueError("aggressive campaign is not active")
     return payload
+
+
+def load_session_summary(state_dir: Path) -> dict[str, Any]:
+    path = session_path(state_dir)
+    if not path.is_file():
+        return {}
+    payload = load_json(path)
+    return {
+        "accepted_run_id": payload.get("accepted_run_id"),
+        "accepted_val_bpb": payload.get("accepted_val_bpb"),
+        "accepted_artifact_bytes": payload.get("accepted_artifact_bytes"),
+        "accepted_results_path": payload.get("accepted_results_path"),
+        "baseline_run_id": payload.get("baseline_run_id"),
+        "baseline_val_bpb": payload.get("baseline_val_bpb"),
+        "baseline_artifact_bytes": payload.get("baseline_artifact_bytes"),
+        "baseline_results_path": payload.get("baseline_results_path"),
+    }
+
+
+def coerce_attempt_results(attempt: dict[str, Any]) -> dict[str, Any] | None:
+    results_path_value = attempt.get("results_json")
+    if results_path_value:
+        results_path = Path(str(results_path_value))
+        if not results_path.is_absolute():
+            results_path = repo_root() / results_path
+        if results_path.is_file():
+            return dict(load_and_validate_results(results_path))
+    if attempt.get("val_bpb") is None and attempt.get("artifact_bytes") is None:
+        return None
+    return {
+        "status": "success",
+        "val_bpb": attempt.get("val_bpb"),
+        "artifact_bytes": attempt.get("artifact_bytes"),
+        "training_seconds": attempt.get("training_seconds"),
+    }
+
+
+def resolve_expected_training_seconds(results: dict[str, Any]) -> float | None:
+    config_path_value = results.get("config_path")
+    if not config_path_value:
+        return None
+    config_path = Path(str(config_path_value))
+    if not config_path.is_absolute():
+        config_path = repo_root() / config_path
+    if not config_path.is_file():
+        return None
+    try:
+        config_payload = load_json(config_path)
+    except Exception:
+        return None
+    value = config_payload.get("max_wallclock_seconds")
+    if value is None:
+        return None
+    return float(value)
+
+
+def assess_attempt(
+    *,
+    results: dict[str, Any] | None,
+    ranking_policy: dict[str, Any],
+    baseline_val_bpb: float | None,
+) -> dict[str, Any]:
+    assessment: dict[str, Any] = {
+        "status": "missing_results" if results is None else str(results.get("status")),
+        "artifact_valid": False,
+        "training_budget_valid": False,
+        "ranking_valid": False,
+        "competitive_gap": None,
+        "classification": "missing_results" if results is None else "unknown",
+        "reasons": [],
+        "expected_training_seconds": None,
+        "training_seconds_ratio": None,
+    }
+    if results is None:
+        assessment["reasons"].append("missing_results_json")
+        return assessment
+
+    artifact_bytes = results.get("artifact_bytes")
+    training_seconds = results.get("training_seconds")
+    val_bpb = results.get("val_bpb")
+    status = str(results.get("status"))
+    expected_training_seconds = resolve_expected_training_seconds(results)
+    assessment["expected_training_seconds"] = expected_training_seconds
+
+    artifact_valid = artifact_bytes is not None and int(artifact_bytes) <= int(ranking_policy["artifact_bytes_hard_max"])
+    assessment["artifact_valid"] = artifact_valid
+    if not artifact_valid:
+        assessment["reasons"].append("artifact_over_cap")
+
+    training_budget_valid = False
+    if training_seconds is not None and expected_training_seconds is not None and expected_training_seconds > 0:
+        ratio = float(training_seconds) / expected_training_seconds
+        assessment["training_seconds_ratio"] = ratio
+        training_budget_valid = (
+            float(ranking_policy["training_seconds_min_ratio"])
+            <= ratio
+            <= float(ranking_policy["training_seconds_max_ratio"])
+        )
+    elif training_seconds is not None and expected_training_seconds is None:
+        training_budget_valid = True
+    assessment["training_budget_valid"] = training_budget_valid
+    if not training_budget_valid:
+        assessment["reasons"].append("off_budget_training_time")
+
+    if baseline_val_bpb is not None and val_bpb is not None:
+        assessment["competitive_gap"] = float(val_bpb) - float(baseline_val_bpb)
+
+    ranking_valid = status == "success" and val_bpb is not None and artifact_valid and training_budget_valid
+    assessment["ranking_valid"] = ranking_valid
+
+    if status != "success" or val_bpb is None:
+        assessment["classification"] = "failed"
+    elif not artifact_valid or not training_budget_valid:
+        assessment["classification"] = "invalid_budget"
+    elif baseline_val_bpb is None:
+        assessment["classification"] = "valid_unscoped"
+    else:
+        gap = float(val_bpb) - float(baseline_val_bpb)
+        if gap <= float(ranking_policy["contender_bpb_gap"]):
+            assessment["classification"] = "contender"
+        elif gap >= float(ranking_policy["catastrophic_bpb_gap"]):
+            assessment["classification"] = "catastrophic"
+        elif gap >= float(ranking_policy["poor_bpb_gap"]):
+            assessment["classification"] = "noncontender"
+        else:
+            assessment["classification"] = "valid_but_weak"
+    return assessment
+
+
+def dominates_attempt(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_val = left.get("val_bpb")
+    right_val = right.get("val_bpb")
+    left_bytes = left.get("artifact_bytes")
+    right_bytes = right.get("artifact_bytes")
+    if left_val is None or right_val is None or left_bytes is None or right_bytes is None:
+        return False
+    return (
+        float(left_val) <= float(right_val)
+        and int(left_bytes) <= int(right_bytes)
+        and (float(left_val) < float(right_val) or int(left_bytes) < int(right_bytes))
+    )
+
+
+def pareto_frontier(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    valid_attempts = [
+        {
+            "run_id": item.get("run_id"),
+            "decision": item.get("decision"),
+            "val_bpb": item.get("val_bpb"),
+            "artifact_bytes": item.get("artifact_bytes"),
+            "training_seconds": item.get("training_seconds"),
+            "classification": item.get("classification"),
+        }
+        for item in attempts
+        if item.get("ranking_valid") and item.get("val_bpb") is not None and item.get("artifact_bytes") is not None
+    ]
+    frontier: list[dict[str, Any]] = []
+    for candidate in valid_attempts:
+        if any(dominates_attempt(other, candidate) for other in valid_attempts if other is not candidate):
+            continue
+        frontier.append(candidate)
+    frontier.sort(key=lambda item: (float(item["val_bpb"]), int(item["artifact_bytes"])))
+    return frontier[:5]
+
+
+def update_idea_rollups(
+    idea: dict[str, Any],
+    *,
+    attempt: dict[str, Any],
+    results: dict[str, Any] | None,
+    assessment: dict[str, Any],
+) -> None:
+    if results is not None and results.get("val_bpb") is not None:
+        best_observed = idea.get("best_observed_val_bpb")
+        if best_observed is None or float(results["val_bpb"]) < float(best_observed):
+            idea["best_observed_val_bpb"] = float(results["val_bpb"])
+            idea["best_observed_run_id"] = attempt["run_id"]
+
+    if assessment["ranking_valid"]:
+        idea["valid_attempts"] += 1
+        best_valid = idea.get("best_valid_val_bpb")
+        if results is not None and results.get("val_bpb") is not None and (
+            best_valid is None or float(results["val_bpb"]) < float(best_valid)
+        ):
+            idea["best_valid_val_bpb"] = float(results["val_bpb"])
+            idea["best_valid_run_id"] = attempt["run_id"]
+    else:
+        idea["invalid_attempts"] += 1
+
+    if assessment["classification"] == "catastrophic":
+        idea["catastrophic_attempts"] += 1
+    if assessment["classification"] == "contender":
+        idea["contender_attempts"] += 1
+
+    if attempt["decision"] == "accepted":
+        idea["accepted_attempts"] += 1
+        if assessment["ranking_valid"]:
+            idea["accepted_valid_attempts"] += 1
+        else:
+            idea["accepted_invalid_attempts"] += 1
+        if results is not None and results.get("val_bpb") is not None:
+            best = idea.get("best_val_bpb")
+            if best is None or float(results["val_bpb"]) < float(best):
+                idea["best_val_bpb"] = float(results["val_bpb"])
+                idea["best_run_id"] = attempt["run_id"]
+
+    idea["pareto_frontier"] = pareto_frontier(idea["attempts"])
+
+
+def reset_idea_rollups(idea: dict[str, Any]) -> None:
+    idea["accepted_attempts"] = 0
+    idea["accepted_valid_attempts"] = 0
+    idea["accepted_invalid_attempts"] = 0
+    idea["best_val_bpb"] = None
+    idea["best_run_id"] = None
+    idea["best_observed_val_bpb"] = None
+    idea["best_observed_run_id"] = None
+    idea["best_valid_val_bpb"] = None
+    idea["best_valid_run_id"] = None
+    idea["valid_attempts"] = 0
+    idea["invalid_attempts"] = 0
+    idea["catastrophic_attempts"] = 0
+    idea["contender_attempts"] = 0
+    idea["pareto_frontier"] = []
+    idea["early_stop_reason"] = None
+
+
+def recompute_campaign_rollups(state_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    ranking_policy = normalize_ranking_policy(payload.get("ranking_policy"))
+    session_summary = load_session_summary(state_dir)
+    baseline_val_bpb = session_summary.get("accepted_val_bpb")
+    changed = False
+    for idea in payload.get("ideas", []):
+        original_snapshot = json.dumps(
+            {
+                key: idea.get(key)
+                for key in (
+                    "accepted_attempts",
+                    "accepted_valid_attempts",
+                    "accepted_invalid_attempts",
+                    "best_val_bpb",
+                    "best_run_id",
+                    "best_observed_val_bpb",
+                    "best_observed_run_id",
+                    "best_valid_val_bpb",
+                    "best_valid_run_id",
+                    "valid_attempts",
+                    "invalid_attempts",
+                    "catastrophic_attempts",
+                    "contender_attempts",
+                    "pareto_frontier",
+                    "early_stop_reason",
+                )
+            },
+            sort_keys=True,
+        )
+        reset_idea_rollups(idea)
+        normalized_attempts: list[dict[str, Any]] = []
+        for attempt in idea.get("attempts", []):
+            attempt_payload = dict(attempt)
+            results = coerce_attempt_results(attempt_payload)
+            assessment = assess_attempt(results=results, ranking_policy=ranking_policy, baseline_val_bpb=baseline_val_bpb)
+            attempt_payload["classification"] = assessment["classification"]
+            attempt_payload["ranking_valid"] = assessment["ranking_valid"]
+            attempt_payload["artifact_valid"] = assessment["artifact_valid"]
+            attempt_payload["training_budget_valid"] = assessment["training_budget_valid"]
+            attempt_payload["competitive_gap"] = assessment["competitive_gap"]
+            attempt_payload["expected_training_seconds"] = assessment["expected_training_seconds"]
+            attempt_payload["training_seconds_ratio"] = assessment["training_seconds_ratio"]
+            attempt_payload["policy_violation"] = attempt_payload.get("decision") == "accepted" and not assessment["ranking_valid"]
+            attempt_payload["reasons"] = list(assessment["reasons"])
+            normalized_attempts.append(attempt_payload)
+            update_idea_rollups(idea, attempt=attempt_payload, results=results, assessment=assessment)
+        idea["attempts"] = normalized_attempts
+        maybe_mark_early_stop(payload, idea, baseline_val_bpb=baseline_val_bpb)
+        refreshed_snapshot = json.dumps(
+            {
+                key: idea.get(key)
+                for key in (
+                    "accepted_attempts",
+                    "accepted_valid_attempts",
+                    "accepted_invalid_attempts",
+                    "best_val_bpb",
+                    "best_run_id",
+                    "best_observed_val_bpb",
+                    "best_observed_run_id",
+                    "best_valid_val_bpb",
+                    "best_valid_run_id",
+                    "valid_attempts",
+                    "invalid_attempts",
+                    "catastrophic_attempts",
+                    "contender_attempts",
+                    "pareto_frontier",
+                    "early_stop_reason",
+                )
+            },
+            sort_keys=True,
+        )
+        if refreshed_snapshot != original_snapshot:
+            changed = True
+    if changed:
+        payload["updated_at_unix"] = time.time()
+    return payload
+
+
+def maybe_mark_early_stop(
+    campaign: dict[str, Any],
+    idea: dict[str, Any],
+    *,
+    baseline_val_bpb: float | None,
+) -> None:
+    if idea.get("early_stop_reason") is not None:
+        return
+    attempts_used = int(idea.get("attempts_used", 0))
+    policy = campaign.get("ranking_policy") or DEFAULT_RANKING_POLICY
+    if attempts_used < int(policy["min_attempts_before_early_stop"]):
+        return
+
+    if idea.get("contender_attempts", 0) > 0:
+        return
+
+    if idea.get("invalid_attempts", 0) >= int(policy["max_invalid_attempts_before_early_stop"]):
+        idea["early_stop_reason"] = "too_many_invalid_attempts"
+        return
+
+    if idea.get("catastrophic_attempts", 0) >= int(policy["max_catastrophic_attempts_before_early_stop"]):
+        idea["early_stop_reason"] = "too_many_catastrophic_attempts"
+        return
+
+    if attempts_used >= int(policy["max_noncontender_attempts_before_early_stop"]):
+        best_valid = idea.get("best_valid_val_bpb")
+        if best_valid is None:
+            idea["early_stop_reason"] = "no_valid_contender_after_multiple_attempts"
+            return
+        if baseline_val_bpb is not None and (
+            float(best_valid) - float(baseline_val_bpb) >= float(policy["poor_bpb_gap"])
+        ):
+            idea["early_stop_reason"] = "best_valid_run_still_far_off_frontier"
 
 
 def record_attempt(
@@ -250,9 +653,13 @@ def record_attempt(
     if idea is None:
         raise ValueError("no active idea to record")
 
+    ranking_policy = normalize_ranking_policy(payload.get("ranking_policy"))
+    session_summary = load_session_summary(state_dir)
+    baseline_val_bpb = session_summary.get("accepted_val_bpb")
     results: dict[str, Any] | None = None
     if results_json is not None:
         results = dict(load_and_validate_results(results_json))
+    assessment = assess_attempt(results=results, ranking_policy=ranking_policy, baseline_val_bpb=baseline_val_bpb)
 
     attempt = {
         "recorded_at_unix": time.time(),
@@ -262,17 +669,21 @@ def record_attempt(
         "val_bpb": None if results is None else results.get("val_bpb"),
         "artifact_bytes": None if results is None else results.get("artifact_bytes"),
         "training_seconds": None if results is None else results.get("training_seconds"),
+        "classification": assessment["classification"],
+        "ranking_valid": assessment["ranking_valid"],
+        "artifact_valid": assessment["artifact_valid"],
+        "training_budget_valid": assessment["training_budget_valid"],
+        "competitive_gap": assessment["competitive_gap"],
+        "expected_training_seconds": assessment["expected_training_seconds"],
+        "training_seconds_ratio": assessment["training_seconds_ratio"],
+        "policy_violation": decision == "accepted" and not assessment["ranking_valid"],
+        "reasons": list(assessment["reasons"]),
         "notes": notes,
     }
     idea["attempts"].append(attempt)
     idea["attempts_used"] += 1
-    if decision == "accepted":
-        idea["accepted_attempts"] += 1
-        if results is not None:
-            best = idea.get("best_val_bpb")
-            if best is None or results["val_bpb"] < best:
-                idea["best_val_bpb"] = results["val_bpb"]
-                idea["best_run_id"] = run_id
+    update_idea_rollups(idea, attempt=attempt, results=results, assessment=assessment)
+    maybe_mark_early_stop(payload, idea, baseline_val_bpb=baseline_val_bpb)
 
     refresh_status(payload)
     write_campaign(state_dir, payload)
@@ -283,17 +694,26 @@ def print_payload(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def idea_runtime_view(idea: dict[str, Any]) -> dict[str, Any]:
+def idea_runtime_view(campaign: dict[str, Any], idea: dict[str, Any], state_dir: Path) -> dict[str, Any]:
     payload = dict(idea)
     blueprints = [dict(item) for item in idea.get("attempt_blueprints", [])]
     attempts_used = int(idea.get("attempts_used", 0))
     attempts_allowed = int(idea.get("attempts_allowed", 0))
     next_index = attempts_used if attempts_used < len(blueprints) else None
+    session_summary = load_session_summary(state_dir)
+    best_valid = idea.get("best_valid_val_bpb")
+    baseline_val_bpb = session_summary.get("accepted_val_bpb")
+    contender_found = idea.get("contender_attempts", 0) > 0
     payload["attempts_remaining"] = max(0, attempts_allowed - attempts_used)
     payload["next_attempt_number"] = None if next_index is None else attempts_used + 1
     payload["completed_blueprints"] = blueprints[:attempts_used]
     payload["remaining_blueprints"] = blueprints[attempts_used:]
     payload["next_attempt_blueprint"] = None if next_index is None else blueprints[next_index]
+    payload["ranking_policy"] = dict(campaign.get("ranking_policy", DEFAULT_RANKING_POLICY))
+    payload["campaign_default_regime"] = dict(campaign.get("campaign_default_regime", {}))
+    payload["accepted_baseline"] = session_summary
+    payload["frontier_gap_to_baseline"] = None if best_valid is None or baseline_val_bpb is None else float(best_valid) - float(baseline_val_bpb)
+    payload["recommended_phase"] = "refine" if contender_found else "establish"
     return payload
 
 
@@ -331,7 +751,7 @@ def main() -> None:
         idea = current_idea(payload)
         if idea is None:
             raise ValueError("no active idea")
-        print_payload(idea_runtime_view(idea))
+        print_payload(idea_runtime_view(payload, idea, state_dir))
         return
     if args.command == "require-active":
         print_payload(require_active(state_dir))

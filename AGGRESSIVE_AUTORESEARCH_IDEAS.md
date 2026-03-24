@@ -55,6 +55,11 @@ The first four attempts of a story should be the most different variants, not th
 - If a story implies a truly new mechanism, the agent should write that mechanism instead of
   shrinking the story into another local toggle.
 - The campaign should prefer cleanly interpretable branch establishment over conservative branch polish.
+- Ranking still uses the aggressive campaign validity policy:
+  - under the `16 MB` artifact cap
+  - within a comparable proxy training-time band
+  - close enough to the accepted baseline to remain a plausible branch
+- The controller may terminate a story early after repeated invalid-budget or catastrophic runs.
 
 ## Story 1: XSA + Neural Cache
 

@@ -5,7 +5,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from train import append_jsonl, atomic_write_json, load_and_validate_results
 
@@ -121,6 +121,11 @@ SEARCH_DO_NOT_OVERWEIGHT = [
     "Do not repeat known-losing compact-line moves without a new major hypothesis.",
     "Do not keep using recurrence or tiny-model compression as the main search direction.",
 ]
+AGGRESSIVE_ACCEPT_DEFAULT_POLICY = {
+    "artifact_bytes_hard_max": 16_000_000,
+    "training_seconds_min_ratio": 0.70,
+    "training_seconds_max_ratio": 1.40,
+}
 
 
 def repo_root() -> Path:
@@ -153,6 +158,10 @@ def errors_log_path(state_dir: Path) -> Path:
 
 def runs_dir_path(state_dir: Path) -> Path:
     return state_dir / "runs"
+
+
+def aggressive_campaign_path(state_dir: Path) -> Path:
+    return state_dir / "aggressive_campaign.json"
 
 
 def tracked_autoresearch_dir() -> Path:
@@ -237,6 +246,70 @@ def append_experiment_event(state_dir: Path, payload: dict[str, Any]) -> Path:
         **payload,
     }
     return append_jsonl(experiments_path(state_dir), event)
+
+
+def load_aggressive_accept_policy(state_dir: Path) -> dict[str, float | int] | None:
+    path = aggressive_campaign_path(state_dir)
+    if not path.is_file():
+        return None
+    payload = load_json(path)
+    raw_policy = payload.get("ranking_policy")
+    if not isinstance(raw_policy, dict):
+        raw_policy = {}
+    merged = dict(AGGRESSIVE_ACCEPT_DEFAULT_POLICY)
+    for key in merged:
+        if key in raw_policy:
+            merged[key] = raw_policy[key]
+    return {
+        "artifact_bytes_hard_max": int(merged["artifact_bytes_hard_max"]),
+        "training_seconds_min_ratio": float(merged["training_seconds_min_ratio"]),
+        "training_seconds_max_ratio": float(merged["training_seconds_max_ratio"]),
+    }
+
+
+def resolve_expected_training_seconds(results: Mapping[str, Any]) -> float | None:
+    config_path_value = results.get("config_path")
+    if not config_path_value:
+        return None
+    config_path = Path(str(config_path_value))
+    if not config_path.is_absolute():
+        config_path = repo_root() / config_path
+    if not config_path.is_file():
+        return None
+    try:
+        config_payload = load_json(config_path)
+    except Exception:
+        return None
+    value = config_payload.get("max_wallclock_seconds")
+    if value is None:
+        return None
+    return float(value)
+
+
+def ensure_aggressive_accept_valid(state_dir: Path, results: Mapping[str, Any] | None) -> None:
+    policy = load_aggressive_accept_policy(state_dir)
+    if policy is None or results is None:
+        return
+
+    artifact_bytes = results.get("artifact_bytes")
+    if artifact_bytes is None or int(artifact_bytes) > int(policy["artifact_bytes_hard_max"]):
+        raise ValueError(
+            "cannot accept aggressive run outside ranking policy: "
+            f"artifact_bytes={artifact_bytes} hard_max={policy['artifact_bytes_hard_max']}"
+        )
+
+    expected_training_seconds = resolve_expected_training_seconds(results)
+    training_seconds = results.get("training_seconds")
+    if expected_training_seconds is None or training_seconds is None or expected_training_seconds <= 0:
+        return
+
+    ratio = float(training_seconds) / expected_training_seconds
+    if not (float(policy["training_seconds_min_ratio"]) <= ratio <= float(policy["training_seconds_max_ratio"])):
+        raise ValueError(
+            "cannot accept aggressive run outside ranking policy: "
+            f"training_seconds_ratio={ratio:.3f} expected_range="
+            f"[{policy['training_seconds_min_ratio']:.2f}, {policy['training_seconds_max_ratio']:.2f}]"
+        )
 
 
 def repo_relative_path(path: Path | None) -> str | None:
@@ -687,6 +760,8 @@ def decide_run(state_dir: Path, run_id: str, decision: str, results_json: Path |
 
     resolved_results = None if results_json is None else resolve_results_source(results_json)
     results = None if resolved_results is None else dict(load_and_validate_results(resolved_results))
+    if decision == "accepted":
+        ensure_aggressive_accept_valid(state_dir, results)
     branch = current_branch()
     commit = current_commit()
     commit_short = current_commit_short()

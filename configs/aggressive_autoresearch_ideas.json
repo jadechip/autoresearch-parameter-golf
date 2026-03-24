@@ -4,6 +4,18 @@
   "tries_per_idea_default": 6,
   "attempt_mode_default": "blueprint_locked_freeform_redesign",
   "variant_rule_default": "Each attempt must implement the next blueprint as a materially different architecture redesign, not a local refinement ladder.",
+  "ranking_policy": {
+    "artifact_bytes_hard_max": 16000000,
+    "training_seconds_min_ratio": 0.7,
+    "training_seconds_max_ratio": 1.4,
+    "contender_bpb_gap": 0.015,
+    "poor_bpb_gap": 0.025,
+    "catastrophic_bpb_gap": 0.05,
+    "min_attempts_before_early_stop": 2,
+    "max_invalid_attempts_before_early_stop": 2,
+    "max_catastrophic_attempts_before_early_stop": 2,
+    "max_noncontender_attempts_before_early_stop": 4
+  },
   "campaign_default_regime": {
     "artifact_target_bytes_min": 15200000,
     "artifact_target_bytes_max": 15900000,

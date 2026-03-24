@@ -70,6 +70,10 @@ Aggressive-campaign rules:
   - `next_attempt_blueprint`
   - `completed_blueprints`
   - `remaining_blueprints`
+  - `ranking_policy`
+  - `accepted_baseline`
+  - `pareto_frontier`
+  - `recommended_phase`
 - respect them literally
 - implement the exact `next_attempt_blueprint`; do not pick a different safer mutation inside the same story
 - if the idea needs a missing self-contained module in `train.py`, implement it instead of shrinking the idea into another precision nudge
@@ -98,6 +102,14 @@ Variant validity rule:
 - if you cannot describe the attempt as a new architecture variant in one sentence, it is probably too small
 - if the resulting carrier still looks like the current depth-3 neighbor-mixer line with a few toggles, it is too small
 
+Validity rule:
+- treat `ranking_policy` as the hard proxy-ranking rule for the campaign
+- runs over the artifact hard cap or materially off the expected training budget are automatically non-contenders
+- only accept runs that are ranking-valid
+- the controller will reject an `accepted` decision for an invalid aggressive run, so do not try to promote one
+- if a run is informative but invalid, revert it and record the lesson in notes
+- if `recommended_phase` is still `establish`, do not spend a remaining attempt on a tiny cleanup or polish move
+
 Free-form redesign rule:
 - you are allowed to replace the accepted carrier wholesale
 - you are allowed to change params, layers, partitioning, context, batch regime, and module stack
@@ -115,6 +127,7 @@ Useful framing for the first few attempts of an idea:
 - attempt 1-2: establish a viable branch and get it training cleanly
 - attempt 3-4: fix obvious weak points or spend saved compute/bytes more intelligently
 - attempt 5-6: refine only if the branch looks real; otherwise take the biggest still-plausible variation within the same idea
+- repeated invalid-budget or catastrophic runs are a sign to let the controller advance to the next story instead of forcing another polish attempt
 
 Search policy for this aggressive loop:
 - treat leaderboard patterns as priors, not recipes
@@ -134,7 +147,7 @@ Required loop for this invocation:
 4. commit the experiment, including the idea id in the commit message
 5. run exactly one `bash scripts/run_autoresearch_experiment.sh`
 6. inspect `latest.json`, `best.json`, and the concrete run outputs under `runs/autoresearch_5090_aggressive/`
-7. keep the experiment commit if it wins, otherwise add a revert commit
+7. if the run is ranking-valid and wins, keep the experiment commit; otherwise add a revert commit
 8. record the decision with:
    `.venv/bin/python scripts/autoresearch_state.py --state_dir "$STATE_DIR" decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
 9. record the attempt with:
