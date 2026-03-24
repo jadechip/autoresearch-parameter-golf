@@ -10,6 +10,8 @@ TRACKED_ACCEPTED_STATE="${TRACKED_ACCEPTED_STATE:-$ROOT_DIR/state/autoresearch/a
 MAIN_STATE_DIR="${MAIN_STATE_DIR:-$ROOT_DIR/.autoresearch}"
 IDEAS_JSON="${IDEAS_JSON:-$ROOT_DIR/configs/aggressive_autoresearch_ideas.json}"
 TRIES_PER_IDEA="${TRIES_PER_IDEA:-6}"
+LANE="${LANE:-frontier_pure_model}"
+POLICY_JSON="${POLICY_JSON:-}"
 FORCE="${FORCE:-0}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -41,13 +43,21 @@ echo "STATE_DIR=$STATE_DIR"
 echo "TRACKED_ACCEPTED_STATE=$TRACKED_ACCEPTED_STATE"
 echo "IDEAS_JSON=$IDEAS_JSON"
 echo "TRIES_PER_IDEA=$TRIES_PER_IDEA"
+echo "LANE=$LANE"
+if [[ -n "$POLICY_JSON" ]]; then
+  echo "POLICY_JSON=$POLICY_JSON"
+fi
 
 tracked_cmd=(
   "$PYTHON_BIN" "$ROOT_DIR/scripts/autoresearch_state.py"
   --state_dir "$STATE_DIR"
   init-from-tracked
   --tracked_state "$TRACKED_ACCEPTED_STATE"
+  --lane "$LANE"
 )
+if [[ -n "$POLICY_JSON" ]]; then
+  tracked_cmd+=(--policy_json "$POLICY_JSON")
+fi
 campaign_cmd=(
   "$PYTHON_BIN" "$ROOT_DIR/scripts/aggressive_autoresearch_campaign.py"
   --state_dir "$STATE_DIR"

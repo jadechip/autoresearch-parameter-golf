@@ -26,7 +26,24 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ModuleNotFoundError:
+    class SummaryWriter:  # type: ignore[override]
+        def __init__(self, *args: Any, **kwargs: Any):
+            self.log_dir = kwargs.get("log_dir")
+
+        def add_scalar(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def add_text(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
 
 
 # ============================================================================
@@ -45,6 +62,8 @@ EXIT_RUNTIME_ERROR = 3
 EXIT_INTERRUPTED = 130
 
 ALLOWED_ADAPTER_TARGETS = ("q", "k", "v", "attn_out", "mlp_in", "mlp_out")
+ALLOWED_MLP_ACTIVATIONS = ("relu2", "leakyrelu2", "relu", "gelu", "silu")
+ALLOWED_CONFIG_TRANSFORM_PROFILES = ("manual", "safe_rebalance", "legacy_lineage")
 HASH_EXCLUDED_KEYS = {
     "output_dir",
     "results_tsv_path",
@@ -91,6 +110,10 @@ class ModelConfig:
     non_recurrent_mlp_hidden_bonus: int | None = None
     shared_mlp_hidden_bonus: int = 0
     rope_base: float = 10_000.0
+    rope_fraction: float = 1.0
+    mlp_activation: str = "relu2"
+    mlp_leak: float = 0.01
+    residual_scale_init: float = 1.0
     logit_softcap: float = 30.0
     tie_embeddings: bool = True
     emb_init_std: float = 0.02
@@ -150,7 +173,9 @@ class QuantConfig:
     keep_float_store_dtype: torch.dtype = torch.float16
     low_bit_name_patterns: tuple[str, ...] = ()
     low_bit_bits: int = 8
+    named_low_bit_rules: tuple[tuple[str, int], ...] = ()
     clip_percentile: float = 99.999
+    clip_percentile_overrides: tuple[tuple[str, float], ...] = ()
     zlib_level: int = 9
 
 
@@ -191,6 +216,7 @@ class TrainConfig:
     benchmark_eval_repeats: int = 1
     counted_code_paths: tuple[str, ...] = ("train.py",)
     artifact_bundle_name: str = "submission_bundle"
+    config_transform_profile: str = "manual"
     model: ModelConfig = field(default_factory=ModelConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
     quant: QuantConfig = field(default_factory=QuantConfig)
@@ -310,6 +336,30 @@ def _maybe_parse_torch_dtype(value: Any) -> Any:
     return value
 
 
+def _normalize_named_numeric_rules(
+    value: Any,
+    *,
+    value_key: str,
+    cast,
+) -> tuple[tuple[str, Any], ...]:
+    if value is None:
+        return ()
+    items: list[tuple[str, Any]] = []
+    iterable = value.items() if isinstance(value, Mapping) else value
+    for item in iterable:
+        if isinstance(item, Mapping):
+            pattern = item.get("pattern")
+            raw_value = item.get(value_key)
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            pattern, raw_value = item
+        else:
+            raise ConfigError(f"unsupported named numeric rule payload: {item!r}")
+        if pattern is None or raw_value is None:
+            raise ConfigError(f"named numeric rule requires pattern and {value_key}: {item!r}")
+        items.append((str(pattern), cast(raw_value)))
+    return tuple(items)
+
+
 def train_config_from_dict(data: Mapping[str, Any]) -> TrainConfig:
     payload = dict(data)
     cfg = TrainConfig(**{k: v for k, v in payload.items() if k not in {"model", "optim", "quant"}})
@@ -329,10 +379,67 @@ def train_config_from_dict(data: Mapping[str, Any]) -> TrainConfig:
             quant_payload["keep_float_name_patterns"] = tuple(quant_payload["keep_float_name_patterns"])
         if "low_bit_name_patterns" in quant_payload and isinstance(quant_payload["low_bit_name_patterns"], list):
             quant_payload["low_bit_name_patterns"] = tuple(quant_payload["low_bit_name_patterns"])
+        if "named_low_bit_rules" in quant_payload:
+            quant_payload["named_low_bit_rules"] = _normalize_named_numeric_rules(
+                quant_payload["named_low_bit_rules"],
+                value_key="bits",
+                cast=int,
+            )
+        if "clip_percentile_overrides" in quant_payload:
+            quant_payload["clip_percentile_overrides"] = _normalize_named_numeric_rules(
+                quant_payload["clip_percentile_overrides"],
+                value_key="clip_percentile",
+                cast=float,
+            )
         cfg.quant = QuantConfig(**quant_payload)
     if isinstance(cfg.counted_code_paths, list):
         cfg.counted_code_paths = tuple(cfg.counted_code_paths)
     return cfg
+
+
+def apply_config_transform_profile(cfg: TrainConfig) -> None:
+    profile = str(cfg.config_transform_profile or "manual")
+    if profile == "manual":
+        return
+    if profile == "safe_rebalance":
+        rebalance_shared_layers_vs_loops(cfg.model)
+        expand_adapter_capacity(cfg.model)
+        return
+    if profile == "legacy_lineage":
+        rebalance_shared_layers_vs_loops(cfg.model)
+        expand_adapter_capacity(cfg.model)
+        reallocate_one_shared_layer_into_tail(cfg.model)
+        reallocate_second_shared_layer_into_tail(cfg.model)
+        reallocate_third_shared_layer_into_tail(cfg.model)
+        move_fake_quant_to_warmup_boundary_on_deep_tail(cfg.model)
+        widen_recurrent_mlp_on_deep_tail(cfg.model)
+        tighten_export_clip_on_accepted_deep_tail(cfg)
+        modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg)
+        shift_accepted_deep_tail_stem_into_tail(cfg)
+        retune_shifted_deep_tail_width_and_warmdown(cfg)
+        use_int6_mlp_export_on_retuned_stemless_deep_tail(cfg)
+        trade_one_tail_block_for_true_3x_tail_mlp_on_int6_baseline(cfg)
+        trade_one_more_tail_block_for_3p5x_tail_mlp_on_int6_true_3x_line(cfg)
+        trade_one_more_tail_block_for_4x_tail_mlp_on_int6_3p5x_line(cfg)
+        trade_one_more_tail_block_for_4p5x_tail_mlp_on_int6_4x_line(cfg)
+        widen_unique_tail_mlp_on_int6_4p5x_line(cfg)
+        widen_unique_tail_mlp_on_int6_5x_line(cfg)
+        extend_context_on_compact_int6_6x_tail_line(cfg)
+        trade_one_tail_block_for_8x_tail_mlp_on_compact_seq640_line(cfg)
+        trade_one_more_tail_block_for_12x_tail_mlp_on_compact_seq640_line(cfg)
+        extend_context_on_compact_tail2_12x_line(cfg)
+        rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg)
+        reallocate_low_rank_q_into_true_3x_carrier_on_recovered_compact_line(cfg)
+        add_short_to_full_context_curriculum_on_low_rank_q_compact_line(cfg)
+        disable_attention_fake_quant_on_warmed_low_rank_q_compact_line(cfg)
+        shrink_global_batch_on_selective_qat_low_rank_q_compact_line(cfg)
+        shrink_global_batch_further_on_selective_qat_low_rank_q_compact_line(cfg)
+        delay_mlp_fake_quant_until_full_context_on_small_batch_selective_qat_line(cfg)
+        restore_full_rank_q_on_final_tail_of_late_qat_small_batch_line(cfg)
+        keep_tied_embeddings_float_on_final_tail_q_small_batch_line(cfg)
+        restore_shared_full_rank_q_and_keep_shared_block_float_on_tied_embed_line(cfg)
+        return
+    raise ConfigError(f"unsupported config_transform_profile: {profile}")
 
 
 def rebalance_shared_layers_vs_loops(model_cfg: ModelConfig) -> None:
@@ -1874,14 +1981,25 @@ class RMSNorm(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim: int, base: float = 10_000.0):
+    def __init__(self, dim: int, base: float = 10_000.0, fraction: float = 1.0):
         super().__init__()
         if dim % 2 != 0:
             raise ValueError(f"RoPE head dim must be even, got {dim}")
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+        if fraction < 0.0 or fraction > 1.0:
+            raise ValueError(f"RoPE fraction must be in [0, 1], got {fraction}")
+        rotary_dim = min(dim, max(0, int((dim * fraction) // 2) * 2))
+        self.dim = dim
+        self.rotary_dim = rotary_dim
+        if rotary_dim > 0:
+            inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim))
+        else:
+            inv_freq = torch.empty((0,), dtype=torch.float32)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def get_cos_sin(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
+        if self.rotary_dim <= 0:
+            empty = torch.empty((seq_len, 0), device=device, dtype=dtype)
+            return empty, empty
         positions = torch.arange(seq_len, device=device, dtype=torch.float32)
         freqs = torch.outer(positions, self.inv_freq.to(device=device))
         cos = freqs.cos().to(dtype=dtype)
@@ -1896,11 +2014,17 @@ def rotate_half(x: Tensor) -> Tensor:
 
 
 def apply_rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    rotary_dim = int(cos.shape[-1] * 2)
+    if rotary_dim <= 0:
+        return x
+    x_rope = x[..., :rotary_dim]
+    x_pass = x[..., rotary_dim:]
     cos_full = torch.stack((cos, cos), dim=-1).flatten(-2)
     sin_full = torch.stack((sin, sin), dim=-1).flatten(-2)
     cos_full = cos_full.unsqueeze(0).unsqueeze(0)
     sin_full = sin_full.unsqueeze(0).unsqueeze(0)
-    return (x * cos_full) + (rotate_half(x) * sin_full)
+    x_rope = (x_rope * cos_full) + (rotate_half(x_rope) * sin_full)
+    return x_rope if x_pass.shape[-1] == 0 else torch.cat((x_rope, x_pass), dim=-1)
 
 
 def per_row_fake_quant_ste(weight: Tensor, eps: float = 1e-8) -> Tensor:
@@ -2037,7 +2161,7 @@ class GroupedQueryAttention(nn.Module):
         self.num_heads = cfg.num_heads
         self.num_kv_heads = cfg.num_kv_heads
         self.head_dim = cfg.d_model // cfg.num_heads
-        self.rope = RotaryEmbedding(self.head_dim, base=cfg.rope_base)
+        self.rope = RotaryEmbedding(self.head_dim, base=cfg.rope_base, fraction=cfg.rope_fraction)
         resolved_q_low_rank = cfg.q_low_rank if q_low_rank is None else q_low_rank
         attn_fake_quant_during_train = (
             cfg.fake_quant_during_train if cfg.attn_fake_quant_during_train is None else cfg.attn_fake_quant_during_train
@@ -2127,7 +2251,21 @@ class GroupedQueryAttention(nn.Module):
         return self.dropout(self.out_proj(attn, slot=slot))
 
 
-class ReLU2MLP(nn.Module):
+def apply_mlp_activation(x: Tensor, activation: str, leak: float) -> Tensor:
+    if activation == "relu2":
+        return torch.relu(x).square()
+    if activation == "leakyrelu2":
+        return F.leaky_relu(x, negative_slope=leak).square()
+    if activation == "relu":
+        return torch.relu(x)
+    if activation == "gelu":
+        return F.gelu(x)
+    if activation == "silu":
+        return F.silu(x)
+    raise ValueError(f"unsupported mlp activation: {activation}")
+
+
+class ActivationMLP(nn.Module):
     def __init__(
         self,
         cfg: ModelConfig,
@@ -2140,6 +2278,8 @@ class ReLU2MLP(nn.Module):
         mlp_fake_quant_during_train = (
             cfg.fake_quant_during_train if fake_quant_during_train is None else fake_quant_during_train
         )
+        self.activation = cfg.mlp_activation
+        self.activation_leak = float(cfg.mlp_leak)
         self.fc = FakeQuantLinear(
             cfg.d_model,
             hidden,
@@ -2168,9 +2308,11 @@ class ReLU2MLP(nn.Module):
         self.proj.set_global_step(step)
 
     def forward(self, x: Tensor, slot: int | None = None) -> Tensor:
-        x = torch.relu(self.fc(x, slot=slot))
-        x = x.square()
+        x = apply_mlp_activation(self.fc(x, slot=slot), self.activation, self.activation_leak)
         return self.dropout(self.proj(x, slot=slot))
+
+
+ReLU2MLP = ActivationMLP
 
 
 class TransformerBlock(nn.Module):
@@ -2186,15 +2328,16 @@ class TransformerBlock(nn.Module):
         self.attn_norm = RMSNorm(cfg.d_model)
         self.mlp_norm = RMSNorm(cfg.d_model)
         self.attn = GroupedQueryAttention(cfg, num_adapter_slots=num_adapter_slots, q_low_rank=q_low_rank)
-        self.mlp = ReLU2MLP(
+        self.mlp = ActivationMLP(
             cfg,
             num_adapter_slots=num_adapter_slots,
             hidden_bonus=mlp_hidden_bonus,
             fake_quant_during_train=mlp_fake_quant_during_train,
         )
         scale_shape = (num_adapter_slots, cfg.d_model) if num_adapter_slots > 0 else (cfg.d_model,)
-        self.attn_scale = nn.Parameter(torch.ones(scale_shape))
-        self.mlp_scale = nn.Parameter(torch.ones(scale_shape))
+        init_scale = float(cfg.residual_scale_init)
+        self.attn_scale = nn.Parameter(torch.full(scale_shape, init_scale))
+        self.mlp_scale = nn.Parameter(torch.full(scale_shape, init_scale))
 
     def set_global_step(self, step: int) -> None:
         self.attn.set_global_step(step)
@@ -2499,32 +2642,96 @@ def _keep_float_tensor(name: str, tensor: Tensor, cfg: QuantConfig, passthrough_
     return tensor
 
 
+def quant_bits_for_tensor(name: str, tensor: Tensor, cfg: QuantConfig) -> int:
+    if tensor.ndim < 2:
+        return 8
+    for pattern, bits in cfg.named_low_bit_rules:
+        if pattern in name:
+            return int(bits)
+    if cfg.low_bit_bits < 8 and any(pattern in name for pattern in cfg.low_bit_name_patterns):
+        return int(cfg.low_bit_bits)
+    return 8
+
+
 def quant_qmax_for_tensor(name: str, tensor: Tensor, cfg: QuantConfig) -> int:
-    if cfg.low_bit_bits < 8 and tensor.ndim >= 2 and any(pattern in name for pattern in cfg.low_bit_name_patterns):
-        return (1 << (cfg.low_bit_bits - 1)) - 1
-    return 127
+    bits = quant_bits_for_tensor(name, tensor, cfg)
+    return (1 << (bits - 1)) - 1 if bits < 8 else 127
 
 
-def quantize_float_tensor_export(name: str, tensor: Tensor, cfg: QuantConfig) -> tuple[Tensor, Tensor]:
+def quant_clip_percentile_for_tensor(name: str, cfg: QuantConfig) -> float:
+    for pattern, percentile in cfg.clip_percentile_overrides:
+        if pattern in name:
+            return float(percentile)
+    return float(cfg.clip_percentile)
+
+
+def pack_signed_tensor_bits(q: Tensor, bits: int) -> Tensor:
+    if bits >= 8:
+        return q.to(dtype=torch.int8).contiguous()
+    qmax = (1 << (bits - 1)) - 1
+    values = (q.detach().to("cpu", dtype=torch.int16).reshape(-1).numpy() + qmax).astype(np.uint8, copy=False)
+    if values.size == 0:
+        return torch.empty((0,), dtype=torch.uint8)
+    unpacked = np.unpackbits(values[:, None], axis=1, bitorder="little")[:, :bits]
+    packed = np.packbits(unpacked.reshape(-1), bitorder="little")
+    return torch.from_numpy(np.ascontiguousarray(packed))
+
+
+def unpack_signed_tensor_bits(blob: Tensor, shape: tuple[int, ...], bits: int) -> Tensor:
+    if bits >= 8:
+        return blob.to(dtype=torch.int8).view(*shape).contiguous()
+    qmax = (1 << (bits - 1)) - 1
+    total_values = int(math.prod(shape))
+    if total_values == 0:
+        return torch.empty(shape, dtype=torch.int8)
+    packed = blob.detach().to("cpu", dtype=torch.uint8).reshape(-1).numpy()
+    unpacked = np.unpackbits(packed, bitorder="little")[: total_values * bits]
+    bit_rows = unpacked.reshape(total_values, bits)
+    full_rows = np.zeros((total_values, 8), dtype=np.uint8)
+    full_rows[:, :bits] = bit_rows
+    values = np.packbits(full_rows, axis=1, bitorder="little").reshape(-1)
+    q = values.astype(np.int16, copy=False) - qmax
+    return torch.from_numpy(np.ascontiguousarray(q.astype(np.int8).reshape(shape)))
+
+
+def quantize_float_tensor_export(name: str, tensor: Tensor, cfg: QuantConfig) -> tuple[Tensor, Tensor, dict[str, Any]]:
     t32 = tensor.float()
+    bits = quant_bits_for_tensor(name, t32, cfg)
     qmax = quant_qmax_for_tensor(name, t32, cfg)
-    q_level = cfg.clip_percentile / 100.0
+    clip_percentile = quant_clip_percentile_for_tensor(name, cfg)
+    q_level = clip_percentile / 100.0
     if t32.ndim == 2:
         clip = torch.quantile(t32.abs(), q_level, dim=1) if t32.numel() else torch.empty((t32.shape[0],), dtype=torch.float32)
         clip = clip.clamp_min(1.0 / qmax)
         clipped = torch.maximum(torch.minimum(t32, clip[:, None]), -clip[:, None])
         scale = (clip / qmax).clamp_min(1.0 / qmax)
         q = torch.clamp(torch.round(clipped / scale[:, None]), -qmax, qmax).to(torch.int8).contiguous()
-        return q, scale.to(dtype=cfg.scale_store_dtype).contiguous()
+        meta = {
+            "scheme": "per_row",
+            "axis": 0,
+            "bits": bits,
+            "clip_percentile": clip_percentile,
+            "packed": bits < 8,
+            "shape": list(q.shape),
+        }
+        return q, scale.to(dtype=cfg.scale_store_dtype).contiguous(), meta
     clip_scalar = float(torch.quantile(t32.abs().flatten(), q_level).item()) if t32.numel() else 0.0
     clip_scalar = max(clip_scalar, 1.0 / qmax)
     scale = torch.tensor(clip_scalar / qmax, dtype=torch.float32)
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_scalar, clip_scalar) / scale), -qmax, qmax).to(torch.int8).contiguous()
-    return q, scale
+    meta = {
+        "scheme": "scalar",
+        "bits": bits,
+        "clip_percentile": clip_percentile,
+        "packed": bits < 8,
+        "shape": list(q.shape),
+    }
+    return q, scale, meta
 
 
 def quantize_state_dict_int8(state_dict: dict[str, Tensor], cfg: QuantConfig) -> tuple[dict[str, Any], dict[str, int]]:
     quantized: dict[str, Tensor] = OrderedDict()
+    packed_quantized: dict[str, Tensor] = OrderedDict()
     scales: dict[str, Tensor] = OrderedDict()
     dtypes: dict[str, str] = OrderedDict()
     passthrough: dict[str, Tensor] = OrderedDict()
@@ -2554,16 +2761,21 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor], cfg: QuantConfig) ->
             stats["quant_payload_bytes"] += tensor_nbytes(kept)
             continue
         stats["num_float_tensors"] += 1
-        q, scale = quantize_float_tensor_export(name, t, cfg)
-        quantized[name] = q
+        q, scale, meta = quantize_float_tensor_export(name, t, cfg)
+        if meta["packed"]:
+            packed_q = pack_signed_tensor_bits(q, int(meta["bits"]))
+            packed_quantized[name] = packed_q
+            stats["quant_payload_bytes"] += tensor_nbytes(packed_q) + tensor_nbytes(scale)
+        else:
+            quantized[name] = q
+            stats["quant_payload_bytes"] += tensor_nbytes(q) + tensor_nbytes(scale)
         scales[name] = scale
         dtypes[name] = str(t.dtype).removeprefix("torch.")
-        if scale.ndim > 0:
-            qmeta[name] = {"scheme": "per_row", "axis": 0}
-        stats["quant_payload_bytes"] += tensor_nbytes(q) + tensor_nbytes(scale)
+        qmeta[name] = meta
     payload: dict[str, Any] = {
-        "__quant_format__": "rowwise_int8_lora_recurrent_v1",
+        "__quant_format__": "rowwise_mixedbit_lora_recurrent_v2",
         "quantized": quantized,
+        "packed_quantized": packed_quantized,
         "scales": scales,
         "dtypes": dtypes,
         "passthrough": passthrough,
@@ -2579,10 +2791,24 @@ def dequantize_state_dict_int8(payload: Mapping[str, Any]) -> dict[str, Tensor]:
     out: dict[str, Tensor] = OrderedDict()
     qmeta = payload.get("qmeta", {})
     passthrough_orig_dtypes = payload.get("passthrough_orig_dtypes", {})
-    for name, q in payload["quantized"].items():
+    for name, q in payload.get("quantized", {}).items():
         dtype = getattr(torch, payload["dtypes"][name])
         scale = payload["scales"][name]
         if qmeta.get(name, {}).get("scheme") == "per_row" or scale.ndim > 0:
+            scale = scale.to(dtype=torch.float32)
+            out[name] = (q.float() * scale.view(q.shape[0], *([1] * (q.ndim - 1)))).to(dtype=dtype).contiguous()
+        else:
+            out[name] = (q.float() * float(scale.item())).to(dtype=dtype).contiguous()
+    for name, packed in payload.get("packed_quantized", {}).items():
+        meta = dict(qmeta.get(name, {}))
+        bits = int(meta.get("bits", 8))
+        shape = tuple(int(v) for v in meta.get("shape", []))
+        if not shape:
+            raise ConfigError(f"packed tensor missing shape metadata: {name}")
+        q = unpack_signed_tensor_bits(packed, shape, bits)
+        dtype = getattr(torch, payload["dtypes"][name])
+        scale = payload["scales"][name]
+        if meta.get("scheme") == "per_row" or scale.ndim > 0:
             scale = scale.to(dtype=torch.float32)
             out[name] = (q.float() * scale.view(q.shape[0], *([1] * (q.ndim - 1)))).to(dtype=dtype).contiguous()
         else:
@@ -2599,7 +2825,8 @@ def dequantize_state_dict_int8(payload: Mapping[str, Any]) -> dict[str, Tensor]:
 def pack_quantized_payload(payload: Mapping[str, Any], cfg: QuantConfig) -> bytes:
     grouped: dict[str, Any] = {
         "__quant_format__": payload["__quant_format__"],
-        "quantized": OrderedDict(payload["quantized"]),
+        "quantized": OrderedDict(payload.get("quantized", {})),
+        "packed_quantized": OrderedDict(payload.get("packed_quantized", {})),
         "scales": OrderedDict(payload["scales"]),
         "dtypes": OrderedDict(payload["dtypes"]),
         "passthrough": OrderedDict(payload["passthrough"]),
@@ -3086,6 +3313,14 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("vocab_size must be positive")
     if cfg.model.seq_len <= 0:
         raise ConfigError("seq_len must be positive")
+    if cfg.model.rope_fraction < 0.0 or cfg.model.rope_fraction > 1.0:
+        raise ConfigError("rope_fraction must be in [0, 1]")
+    if cfg.model.mlp_activation not in ALLOWED_MLP_ACTIVATIONS:
+        raise ConfigError(f"mlp_activation must be one of {ALLOWED_MLP_ACTIVATIONS}")
+    if cfg.model.mlp_leak < 0.0 or cfg.model.mlp_leak > 1.0:
+        raise ConfigError("mlp_leak must be in [0, 1]")
+    if cfg.model.residual_scale_init < 0.0:
+        raise ConfigError("residual_scale_init must be >= 0")
     if cfg.model.non_recurrent_mlp_hidden_bonus is not None and cfg.model.non_recurrent_mlp_hidden_bonus < 0:
         raise ConfigError("non_recurrent_mlp_hidden_bonus must be >= 0 when set")
     if cfg.model.shared_mlp_hidden_bonus < 0:
@@ -3128,6 +3363,18 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("quant.clip_percentile must be in (0, 100]")
     if cfg.quant.low_bit_bits < 2 or cfg.quant.low_bit_bits > 8:
         raise ConfigError("quant.low_bit_bits must be in [2, 8]")
+    for pattern, bits in cfg.quant.named_low_bit_rules:
+        if bits < 2 or bits > 8:
+            raise ConfigError(f"named_low_bit_rules bits must be in [2, 8], got {bits} for {pattern}")
+    for pattern, percentile in cfg.quant.clip_percentile_overrides:
+        if percentile <= 0.0 or percentile > 100.0:
+            raise ConfigError(
+                f"clip_percentile_overrides must be in (0, 100], got {percentile} for {pattern}"
+            )
+    if cfg.config_transform_profile not in ALLOWED_CONFIG_TRANSFORM_PROFILES:
+        raise ConfigError(
+            f"config_transform_profile must be one of {ALLOWED_CONFIG_TRANSFORM_PROFILES}"
+        )
     invalid_targets = sorted(set(cfg.model.adapter_targets) - set(ALLOWED_ADAPTER_TARGETS))
     if invalid_targets:
         raise ConfigError(f"invalid adapter_targets: {invalid_targets}")
@@ -3831,6 +4078,10 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--max_wallclock_seconds", type=float, default=None)
     parser.add_argument("--seq_len", type=int, default=None)
+    parser.add_argument("--rope_fraction", type=float, default=None)
+    parser.add_argument("--mlp_activation", type=str, default=None)
+    parser.add_argument("--mlp_leak", type=float, default=None)
+    parser.add_argument("--residual_scale_init", type=float, default=None)
     parser.add_argument("--vocab_size", type=int, default=None)
     parser.add_argument("--d_model", type=int, default=None)
     parser.add_argument("--num_heads", type=int, default=None)
@@ -3851,6 +4102,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--scalar_lr", type=float, default=None)
     parser.add_argument("--counted_code_paths", type=str, default=None, help="Comma-separated files to count into artifact_bytes")
     parser.add_argument("--load_artifact_path", type=str, default=None)
+    parser.add_argument("--config_transform_profile", type=str, default=None)
     parser.add_argument("--fake_quant_during_train", action="store_true")
     parser.add_argument("--no_fake_quant_during_train", action="store_true")
     parser.add_argument("--use_compile", action="store_true")
@@ -3920,6 +4172,9 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         "adapter_rank",
         "adapter_alpha",
         "fake_quant_start_step",
+        "rope_fraction",
+        "mlp_leak",
+        "residual_scale_init",
     ]:
         value = getattr(args, name)
         if value is not None:
@@ -3935,6 +4190,10 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         if parsed_targets is None:
             raise ConfigError("adapter_targets parsing failed")
         cfg.model.adapter_targets = parsed_targets
+    if args.mlp_activation is not None:
+        cfg.model.mlp_activation = args.mlp_activation
+    if args.config_transform_profile is not None:
+        cfg.config_transform_profile = args.config_transform_profile
 
     if args.clip_percentile is not None:
         cfg.quant.clip_percentile = args.clip_percentile
@@ -3964,38 +4223,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         cfg.evaluate_only = True
     if args.train_phase_only:
         cfg.train_phase_only = True
-    rebalance_shared_layers_vs_loops(cfg.model)
-    expand_adapter_capacity(cfg.model)
-    reallocate_one_shared_layer_into_tail(cfg.model)
-    reallocate_second_shared_layer_into_tail(cfg.model)
-    reallocate_third_shared_layer_into_tail(cfg.model)
-    move_fake_quant_to_warmup_boundary_on_deep_tail(cfg.model)
-    widen_recurrent_mlp_on_deep_tail(cfg.model)
-    tighten_export_clip_on_accepted_deep_tail(cfg)
-    modestly_widen_recurrent_mlp_on_wallclock_deep_tail(cfg)
-    shift_accepted_deep_tail_stem_into_tail(cfg)
-    retune_shifted_deep_tail_width_and_warmdown(cfg)
-    use_int6_mlp_export_on_retuned_stemless_deep_tail(cfg)
-    trade_one_tail_block_for_true_3x_tail_mlp_on_int6_baseline(cfg)
-    trade_one_more_tail_block_for_3p5x_tail_mlp_on_int6_true_3x_line(cfg)
-    trade_one_more_tail_block_for_4x_tail_mlp_on_int6_3p5x_line(cfg)
-    trade_one_more_tail_block_for_4p5x_tail_mlp_on_int6_4x_line(cfg)
-    widen_unique_tail_mlp_on_int6_4p5x_line(cfg)
-    widen_unique_tail_mlp_on_int6_5x_line(cfg)
-    extend_context_on_compact_int6_6x_tail_line(cfg)
-    trade_one_tail_block_for_8x_tail_mlp_on_compact_seq640_line(cfg)
-    trade_one_more_tail_block_for_12x_tail_mlp_on_compact_seq640_line(cfg)
-    extend_context_on_compact_tail2_12x_line(cfg)
-    rebalance_compact_seq768_tail2_12x_line_into_tail3_8x(cfg)
-    reallocate_low_rank_q_into_true_3x_carrier_on_recovered_compact_line(cfg)
-    add_short_to_full_context_curriculum_on_low_rank_q_compact_line(cfg)
-    disable_attention_fake_quant_on_warmed_low_rank_q_compact_line(cfg)
-    shrink_global_batch_on_selective_qat_low_rank_q_compact_line(cfg)
-    shrink_global_batch_further_on_selective_qat_low_rank_q_compact_line(cfg)
-    delay_mlp_fake_quant_until_full_context_on_small_batch_selective_qat_line(cfg)
-    restore_full_rank_q_on_final_tail_of_late_qat_small_batch_line(cfg)
-    keep_tied_embeddings_float_on_final_tail_q_small_batch_line(cfg)
-    restore_shared_full_rank_q_and_keep_shared_block_float_on_tied_embed_line(cfg)
+    apply_config_transform_profile(cfg)
     return cfg
 
 

@@ -153,3 +153,8 @@ Default branch families:
 - low-rank Q branch
 - Smear or meta-TTT branch
 - context curriculum branch
+
+## Additional Train.py-Local Variant Direction
+- When a blueprint leaves room for a local train-time mechanism, fair-game variants include partial RoPE, leaky-ReLU-squared style activations, residual-scale initialization changes, packed coarse mixed low-bit groupings, and per-pattern clip overrides.
+- New branches should set `config_transform_profile` explicitly so the old lineage heuristics only run when that is the point of the idea.
+- These should be used as creative local mechanisms, not as excuses to copy a public winning config verbatim.

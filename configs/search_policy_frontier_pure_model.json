@@ -1,0 +1,60 @@
+{
+  "lane": "frontier_pure_model",
+  "description": "Discovery and refinement policy for pure-model frontier search. Favor stronger near-cap carriers, post-quant selection, and throughput discipline without relying on eval-time tricks.",
+  "min_meaningful_bpb_gain": 0.001,
+  "artifact_target_bytes_min": 15300000,
+  "artifact_target_bytes_max": 15950000,
+  "max_consecutive_losing_micro_experiments": 2,
+  "max_consecutive_same_family_runs": 2,
+  "story_selection_mode": "one_story_per_iteration",
+  "allow_train_py_module_writes": true,
+  "discovery_mode": "feeder_then_refine",
+  "refinement_gate": {
+    "contender_bpb_gap": 0.015,
+    "require_ranking_valid": true,
+    "prefer_post_quant_refine": true
+  },
+  "preflight": {
+    "enabled": true,
+    "benchmark_train_steps": 2,
+    "min_train_tokens_per_second_ratio": 0.9,
+    "min_total_tokens_ratio": 0.8,
+    "hard_artifact_bytes_max": 16000000,
+    "soft_artifact_bytes_max": 15950000,
+    "soft_artifact_bytes_min": 14000000,
+    "allow_slow_if_within_soft_cap": true,
+    "allow_slow_if_artifact_gain_bytes": 750000,
+    "no_lawa": true,
+    "no_eval_first_step": true,
+    "disable_reload_verify": true,
+    "preflight_exit_code": 10
+  },
+  "creative_guardrails": {
+    "treat_public_frontier_as_prior_not_recipe": true,
+    "require_new_mechanism_or_two_macro_axis_changes_for_structural_runs": true,
+    "avoid_exact_public_architecture_cloning": true,
+    "prefer_clean_isolated_stories": true
+  },
+  "frontier_reference_features": [
+    "near-cap 10-12 layer carriers",
+    "strong post-quant selection and checkpoint choice",
+    "mixed low-bit or coarse selective quantization",
+    "longer context only when throughput is protected",
+    "activation or positional variants that stay local to train.py"
+  ],
+  "do_not_overweight": [
+    "Do not merely transpose a public winning config into this repo.",
+    "Keep at least one material difference in carrier, schedule, module placement, or quant grouping.",
+    "Use creativity where this repo has unique leverage: low-rank Q spends, context curricula, local modules, and post-quant selection."
+  ],
+  "train_config_preferences": {
+    "config_transform_profile": "manual",
+    "preferred_local_knobs": [
+      "rope_fraction",
+      "mlp_activation",
+      "residual_scale_init",
+      "quant.named_low_bit_rules",
+      "quant.clip_percentile_overrides"
+    ]
+  }
+}

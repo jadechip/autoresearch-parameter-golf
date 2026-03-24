@@ -21,10 +21,11 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-2}"
 WAIT_FOR_READY="${WAIT_FOR_READY:-1}"
 CONTINUE_ON_AGENT_FAILURE="${CONTINUE_ON_AGENT_FAILURE:-0}"
+STOP_ON_REFINE_PHASE="${STOP_ON_REFINE_PHASE:-1}"
 
 usage() {
   cat <<'EOF' >&2
-Usage: bash scripts/run_codex_autoresearch_aggressive_loop.sh [--iterations N] [--sleep-seconds N] [--prompt-file PATH] [--model MODEL] [--continue-on-agent-failure]
+Usage: bash scripts/run_codex_autoresearch_aggressive_loop.sh [--iterations N] [--sleep-seconds N] [--prompt-file PATH] [--model MODEL] [--continue-on-agent-failure] [--keep-going-after-contender]
 EOF
   exit 2
 }
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --continue-on-agent-failure)
       CONTINUE_ON_AGENT_FAILURE=1
+      shift
+      ;;
+    --keep-going-after-contender)
+      STOP_ON_REFINE_PHASE=0
       shift
       ;;
     *)
@@ -148,7 +153,7 @@ trap cleanup EXIT
 
 ensure_ready
 
-log_activity "aggressive_codex_loop_start prompt_file=$PROMPT_FILE max_iterations=$MAX_ITERATIONS sleep_seconds=$SLEEP_SECONDS autoresearch_root=$AUTORESEARCH_ROOT"
+log_activity "aggressive_codex_loop_start prompt_file=$PROMPT_FILE max_iterations=$MAX_ITERATIONS sleep_seconds=$SLEEP_SECONDS autoresearch_root=$AUTORESEARCH_ROOT stop_on_refine_phase=$STOP_ON_REFINE_PHASE"
 
 iteration=0
 while true; do
@@ -184,6 +189,13 @@ while true; do
   current_payload="$("$PYTHON_BIN" "$CAMPAIGN_BIN" --state_dir "$STATE_DIR" current)"
   current_idea_id="$(printf '%s' "$current_payload" | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
   current_variant_label="$(printf '%s' "$current_payload" | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); print(((payload.get("next_attempt_blueprint") or {}).get("label")) or "-")')"
+  current_phase="$(printf '%s' "$current_payload" | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); print(payload.get("recommended_phase") or "establish")')"
+  frontier_gap="$(printf '%s' "$current_payload" | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); gap=payload.get("frontier_gap_to_baseline"); print("-" if gap is None else gap)')"
+
+  if [[ "$STOP_ON_REFINE_PHASE" == "1" && "$current_phase" == "refine" ]]; then
+    log_activity "aggressive_handoff_to_refine iteration=$iteration idea=$current_idea_id frontier_gap=$frontier_gap"
+    break
+  fi
 
   cmd=("$CODEX_BIN" exec --dangerously-bypass-approvals-and-sandbox -C "$ROOT_DIR" --color never --output-last-message "$iter_last")
   if [[ -n "$CODEX_MODEL" ]]; then
@@ -191,14 +203,14 @@ while true; do
   fi
   cmd+=(-)
 
-  log_activity "iteration_start iteration=$iteration idea=$current_idea_id variant=$current_variant_label log=$iter_log"
+  log_activity "iteration_start iteration=$iteration idea=$current_idea_id variant=$current_variant_label phase=$current_phase frontier_gap=$frontier_gap log=$iter_log"
   set +e
   "${cmd[@]}" < "$PROMPT_FILE" >"$iter_log" 2>&1
   status=$?
   set -e
 
   if [[ $status -ne 0 ]]; then
-    log_error "iteration_failed iteration=$iteration idea=$current_idea_id variant=$current_variant_label exit_code=$status log=$iter_log"
+    log_error "iteration_failed iteration=$iteration idea=$current_idea_id variant=$current_variant_label phase=$current_phase exit_code=$status log=$iter_log"
     if [[ "$CONTINUE_ON_AGENT_FAILURE" == "1" ]]; then
       sleep "$SLEEP_SECONDS"
       continue
@@ -207,9 +219,9 @@ while true; do
   fi
 
   if [[ -f "$iter_last" ]]; then
-    log_activity "iteration_complete iteration=$iteration idea=$current_idea_id variant=$current_variant_label log=$iter_log last_message=$iter_last"
+    log_activity "iteration_complete iteration=$iteration idea=$current_idea_id variant=$current_variant_label phase=$current_phase log=$iter_log last_message=$iter_last"
   else
-    log_activity "iteration_complete iteration=$iteration idea=$current_idea_id variant=$current_variant_label log=$iter_log"
+    log_activity "iteration_complete iteration=$iteration idea=$current_idea_id variant=$current_variant_label phase=$current_phase log=$iter_log"
   fi
 
   sleep "$SLEEP_SECONDS"

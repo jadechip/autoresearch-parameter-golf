@@ -788,6 +788,91 @@
           ]
         }
       ]
+    },
+    {
+      "id": "activation_rope_residual_variants",
+      "title": "Activation + Partial-RoPE + Residual-Scale Variants",
+      "branch_family": "carrier_repartition",
+      "kind": "existing_surface",
+      "attempt_mode": "blueprint_locked_freeform_redesign",
+      "goal": "Probe local train.py-only mechanisms that can shift quality/throughput tradeoffs without simply copying a public carrier: activation family, partial RoPE, and residual-scale initialization on near-cap carriers.",
+      "must_change_axes": [
+        "module_family",
+        "effective_depth",
+        "schedule_shape"
+      ],
+      "forbidden_refinements": [
+        "same carrier with only one scalar tweak and no real mechanism change",
+        "dropping back to the old compact depth-3 family",
+        "copying a public winning stack without another meaningful difference"
+      ],
+      "hints": [
+        "Keep these attempts on 10-12 layer near-cap carriers.",
+        "Use partial RoPE, leaky-ReLU-squared, or residual-scale init as local mechanisms, not as standalone micro-tunes.",
+        "Preserve at least one major difference from public frontier recipes."
+      ],
+      "attempt_blueprints": [
+        {
+          "label": "A",
+          "title": "Leaky-ReLU\u00b2 Carrier",
+          "summary": "Try an 11-layer 512-dim near-cap carrier that swaps the MLP activation family to leaky-ReLU-squared, keeps the rest simple, and tests whether the activation change supports a stronger carrier at the same proxy budget.",
+          "must_change_axes": [
+            "module_family",
+            "effective_depth",
+            "carrier_shape"
+          ]
+        },
+        {
+          "label": "B",
+          "title": "Partial-RoPE Long Context",
+          "summary": "Use an 11-12 layer carrier with partial RoPE and a 1536-to-2048 context curriculum so the run tests positional selectivity plus longer context, not just another carrier reshape.",
+          "must_change_axes": [
+            "module_family",
+            "seq_len_bucket",
+            "schedule_shape"
+          ]
+        },
+        {
+          "label": "C",
+          "title": "Residual-Scale Init Branch",
+          "summary": "Try a near-cap carrier with smaller residual-scale initialization plus one local activation or RoPE change so the test is still a real branch and not a scalar-only micro-tune.",
+          "must_change_axes": [
+            "module_family",
+            "schedule_shape",
+            "carrier_shape"
+          ]
+        },
+        {
+          "label": "D",
+          "title": "Leaky-ReLU\u00b2 Plus Low-Rank-Q Spend",
+          "summary": "Use low-rank Q to fund a deeper carrier that also changes the activation family, explicitly spending the saved capacity on depth or context instead of same-carrier polish.",
+          "must_change_axes": [
+            "q_rank_topology",
+            "module_family",
+            "effective_depth"
+          ]
+        },
+        {
+          "label": "E",
+          "title": "Partial-RoPE Boundary-Safe Quant Branch",
+          "summary": "Combine partial RoPE with a boundary-safe late-quant grouping on a near-cap carrier so the attempt measures whether a positional change shifts the best coarse quant grouping.",
+          "must_change_axes": [
+            "module_family",
+            "coarse_quant_group",
+            "schedule_shape"
+          ]
+        },
+        {
+          "label": "F",
+          "title": "High-Risk Local-Mechanism Sweep",
+          "summary": "Take the biggest still-plausible train.py-local sweep: partial RoPE, non-default activation family, and a different residual-scale initialization on a near-cap carrier, accepting that the run may score badly if the combination is wrong.",
+          "must_change_axes": [
+            "module_family",
+            "carrier_shape",
+            "schedule_shape"
+          ]
+        }
+      ]
     }
   ]
 }

@@ -24,6 +24,8 @@ At the start of a session, inspect:
 
 Use git history as the experiment memory for what has already been tried and what has already won.
 Use `.venv/bin/python scripts/summarize_recent_autoresearch.py --limit 12` as a compact novelty check before choosing the next mutation.
+Treat `.autoresearch/session.json["search_policy"]` as the live lane policy: it may switch the loop into `frontier_pure_model` or `leaderboard_eval` mode, enable benchmark preflight, and change how discovery versus refinement should be balanced.
+New branches should set `config_transform_profile` explicitly. `manual` means no silent lineage rewrites, `safe_rebalance` allows only broad-shape cleanup, and `legacy_lineage` is for intentionally revisiting the old compact family.
 
 Accepted-state policy:
 
@@ -90,13 +92,13 @@ Keep the competition invariants intact:
 - decoder-only LM
 - tied embeddings
 - GQA
-- RoPE
+- RoPE or a compatible partial-RoPE variant
 - RMSNorm
-- ReLU^2 MLP
-- depth recurrence or shallow shared-core variants via shared blocks
-- per-loop adapters
-- QAT-aware training
-- row-wise INT8 export + zlib packing
+- ReLU^2-family MLPs or other local activation variants that remain submission-safe
+- recurrence or shallow shared-core variants remain allowed, but they are no longer the default frontier assumption
+- per-loop adapters when useful
+- QAT-aware training or PTQ-style post-quant selection
+- row-wise INT8 export + zlib packing, with packed coarse mixed low-bit groups and per-pattern clip overrides when they still export cleanly
 
 You may reallocate capacity within this family and add self-contained local modules that still fit the same submission and export discipline. Do not wander into unrelated training stacks or infra rewrites.
 
@@ -125,9 +127,10 @@ This repo's current compact 5090 baseline materially under-spends the final arti
 
 Use the search policy recorded in `.autoresearch/session.json`:
 
-- soft artifact target band for 5090 search: `12,000,000` to `15,500,000` bytes
-- meaningful improvement threshold: about `0.001 val_bpb`
-- maximum consecutive losing micro-tuning runs before a required structural follow-up: `3`
+- soft artifact target band and lane are now policy-driven; the frontier pure-model lane defaults much closer to the hard cap than the older compact baseline
+- meaningful improvement threshold: about `0.001 val_bpb` unless the lane policy says otherwise
+- maximum consecutive losing micro-tuning runs before a required structural follow-up: usually `2` or `3`, depending on lane
+- benchmark preflight may reject obviously slow or over-cap branches before the full 300-second proxy
 
 ## Search Space
 
@@ -152,7 +155,8 @@ If artifact usage remains far below the cap, prefer bounded architecture / byte-
 Prioritize leaderboard-aligned directions that still fit inside `train.py`:
 
 - low-rank Q as a structural reallocation tool
-- mixed low-bit quantization beyond MLP-only export
+- packed mixed low-bit quantization beyond MLP-only export
+- per-pattern clip percentile sweeps for post-quant robustness
 - selective higher-precision embeddings / head
 - selective or compensated `~3x` MLP families rather than blanket global `mlp_mult=3`
 - longer context or sliding-window eval when compute is reclaimed elsewhere
@@ -167,6 +171,7 @@ Split the next serious search into clean branches instead of one blended stack:
 - late selective quantization / post-quant soup
 - low-rank Q
 - smarter local-token module
+- activation / rope / residual-scaling variants that stay local to `train.py`
 - XSA or top-layer cache
 - SmearGate / TTT
 - Canon or neighboring-token mixer
@@ -209,9 +214,11 @@ Avoid spending time on:
 - Before proposing a new mutation, inspect `.autoresearch/notes.md` so you do not waste runs repeating the same weak structural idea.
 - Use the 5090 autoresearch loop for broad search:
   `bash scripts/run_autoresearch_experiment.sh`
-- Keep experiments on a fixed 300-second budget.
+- Keep experiments on a fixed 300-second budget unless the lane policy says otherwise.
+- Treat the aggressive loop as discovery-first and the ordinary loop as refinement-first once a ranking-valid contender exists.
+- Respect benchmark preflight: a benchmark-only rejection still counts as the completed experiment for that invocation.
 - Use `runs/autoresearch_5090/index/latest.json` and `best.json` as the agent-readable state.
-- Prefer simpler wins first.
+- Prefer simpler wins first, but do not confuse simplicity with shrinking back to the old compact basin.
 - Treat improvements smaller than roughly `0.001 val_bpb` as noise unless they also simplify the code or clearly move the model toward a better production regime.
 - Reject hacks that add complexity for tiny gains.
 - If accepted artifact size is still below the policy target band, do not spend long stretches only micro-tuning optimizer values.

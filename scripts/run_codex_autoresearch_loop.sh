@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 
 STATE_DIR="${STATE_DIR:-$ROOT_DIR/.autoresearch}"
+AUTORESEARCH_ROOT="${AUTORESEARCH_ROOT:-$ROOT_DIR/runs/autoresearch_5090}"
 SESSION_JSON="$STATE_DIR/session.json"
 ACTIVITY_LOG="$STATE_DIR/activity.log"
 ERRORS_LOG="$STATE_DIR/errors.log"
@@ -20,9 +21,9 @@ WAIT_FOR_READY="${WAIT_FOR_READY:-1}"
 CONTINUE_ON_AGENT_FAILURE="${CONTINUE_ON_AGENT_FAILURE:-0}"
 
 usage() {
-  cat <<'EOF' >&2
+  cat <<'EOF2' >&2
 Usage: bash scripts/run_codex_autoresearch_loop.sh [--iterations N] [--sleep-seconds N] [--prompt-file PATH] [--model MODEL] [--continue-on-agent-failure]
-EOF
+EOF2
   exit 2
 }
 
@@ -92,7 +93,7 @@ touch "$ACTIVITY_LOG" "$ERRORS_LOG"
 
 if [[ ! -f "$SESSION_JSON" ]]; then
   echo "Missing autoresearch session: $SESSION_JSON" >&2
-  echo "Run a baseline and then: bash scripts/init_autoresearch_session.sh" >&2
+  echo "Run: bash scripts/init_autoresearch_session.sh" >&2
   exit 2
 fi
 
@@ -108,6 +109,8 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 export PATH="$ROOT_DIR/.venv/bin:$PATH"
+export STATE_DIR
+export AUTORESEARCH_ROOT
 
 if [[ "$CODEX_BIN" == */* ]]; then
   if [[ ! -x "$CODEX_BIN" ]]; then
@@ -131,7 +134,7 @@ trap cleanup EXIT
 
 ensure_ready
 
-log_activity "codex_loop_start prompt_file=$PROMPT_FILE max_iterations=$MAX_ITERATIONS sleep_seconds=$SLEEP_SECONDS"
+log_activity "codex_loop_start prompt_file=$PROMPT_FILE max_iterations=$MAX_ITERATIONS sleep_seconds=$SLEEP_SECONDS autoresearch_root=$AUTORESEARCH_ROOT"
 
 iteration=0
 while true; do
@@ -147,20 +150,24 @@ while true; do
   iter_log="$RUN_LOG_DIR/codex-iteration-$iter_ts.log"
   iter_last="$RUN_LOG_DIR/codex-iteration-$iter_ts.last.txt"
 
+  session_payload="$($PYTHON_BIN "$ROOT_DIR/scripts/autoresearch_state.py" --state_dir "$STATE_DIR" show)"
+  lane="$(printf '%s' "$session_payload" | "$PYTHON_BIN" -c 'import json,sys; print(((json.load(sys.stdin).get("search_policy") or {}).get("lane")) or "-")')"
+  accepted_run_id="$(printf '%s' "$session_payload" | "$PYTHON_BIN" -c 'import json,sys; print((json.load(sys.stdin).get("accepted_run_id")) or "-")')"
+
   cmd=("$CODEX_BIN" exec --dangerously-bypass-approvals-and-sandbox -C "$ROOT_DIR" --color never --output-last-message "$iter_last")
   if [[ -n "$CODEX_MODEL" ]]; then
     cmd+=(-m "$CODEX_MODEL")
   fi
   cmd+=(-)
 
-  log_activity "iteration_start iteration=$iteration log=$iter_log"
+  log_activity "iteration_start iteration=$iteration lane=$lane accepted_run_id=$accepted_run_id log=$iter_log"
   set +e
   "${cmd[@]}" < "$PROMPT_FILE" >"$iter_log" 2>&1
   status=$?
   set -e
 
   if [[ $status -ne 0 ]]; then
-    log_error "iteration_failed iteration=$iteration exit_code=$status log=$iter_log"
+    log_error "iteration_failed iteration=$iteration lane=$lane accepted_run_id=$accepted_run_id exit_code=$status log=$iter_log"
     if [[ "$CONTINUE_ON_AGENT_FAILURE" == "1" ]]; then
       sleep "$SLEEP_SECONDS"
       continue
@@ -169,9 +176,9 @@ while true; do
   fi
 
   if [[ -f "$iter_last" ]]; then
-    log_activity "iteration_complete iteration=$iteration log=$iter_log last_message=$iter_last"
+    log_activity "iteration_complete iteration=$iteration lane=$lane accepted_run_id=$accepted_run_id log=$iter_log last_message=$iter_last"
   else
-    log_activity "iteration_complete iteration=$iteration log=$iter_log"
+    log_activity "iteration_complete iteration=$iteration lane=$lane accepted_run_id=$accepted_run_id log=$iter_log"
   fi
 
   sleep "$SLEEP_SECONDS"

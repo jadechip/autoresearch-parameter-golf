@@ -74,15 +74,18 @@ The current leaderboard frontier is much better than this line and clusters arou
 - tuned Muon / weight decay / SWA schedules
 - in several entries: BigramHash, SmearGate, OrthoInit, or related train-time architectural helpers
 
-Our search has covered some of this, but not enough. In particular, we have not yet seriously explored:
+Our search has covered some of this, but not enough. In particular, we have not yet seriously explored enough of the following clean branch families:
 
-- mixed low-bit quantization beyond MLP-only int6 export
+- packed mixed low-bit quantization beyond MLP-only int6 export
 - a clean leaderboard-style near-full-budget carrier that still fits the 5090 budget
 - low-rank Q as a structural reallocation tool
 - compute-aware context curricula
 - sliding-window eval
 - stronger optimizer bundles with WD / SWA after choosing a structural candidate
 - train-time init / gating ideas like OrthoInit or smear-like residual gating
+- local activation / RoPE / residual-scale variants that remain self-contained inside `train.py`
+- explicit `config_transform_profile` control so creative branches are not silently rewritten into the old lineage
+- per-pattern clip percentile sweeps for post-quant robustness
 
 ## Actionable Campaign Branches
 
@@ -174,7 +177,7 @@ For the next serious 5090 restart:
 1. Spend bytes upward from the recovered `~7.3 MB` baseline toward roughly `12 MB` to `15.5 MB`, not `8 MB`.
 2. Stop treating recurrence or tiny-model compression as the main axis.
 3. Prefer moving onto a stronger carrier before stacking eval-time tricks.
-4. Explore low-rank Q, selective wider MLPs, and compute-aware context together, but one branch at a time.
+4. Explore low-rank Q, selective wider MLPs, compute-aware context, and train.py-local activation or RoPE variants, but one branch at a time.
 5. Use late selective quantization as a second-stage optimization on top of a better carrier, not the first move.
 6. Treat sliding eval and cache ideas as separate branches, not automatic add-ons.
 
@@ -216,3 +219,8 @@ Treat the search as a story board, not as free-form mutation roulette:
 - If recent history is narrow, switch stories before refining.
 - If a story requires a missing self-contained module in `train.py`, implement the module instead of downgrading the story to a precision micro-tune.
 - Keep module-writing stories isolated so the result is interpretable and easy to revert.
+
+
+## Discovery Versus Refinement
+
+Use the aggressive loop to discover new basins and the ordinary loop to refine only those branches that are already ranking-valid and plausibly contender-like. Do not spend the aggressive loop polishing a branch that should instead move into post-quant, checkpoint-choice, or carrier-local refinement.

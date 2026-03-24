@@ -32,6 +32,11 @@ def load_existing_best(path: Path) -> dict | None:
 def is_better(current: dict, best: dict | None) -> bool:
     if current.get("status") != "success" or current.get("val_bpb") is None:
         return False
+    if current.get("mode") != "train":
+        return False
+    preflight = current.get("preflight")
+    if isinstance(preflight, dict) and preflight.get("decision") == "skip":
+        return False
     if best is None:
         return True
     best_bpb = best.get("val_bpb")
@@ -59,6 +64,8 @@ def index_run(results_json: Path, index_dir: Path) -> dict[str, str]:
         "latest_json": str(latest_path),
         "best_json": str(best_path),
         "run_dir": str(run_dir),
+        "latest_mode": str(results.get("mode")),
+        "best_updated": str(is_better(results, existing_best)).lower(),
     }
 
 

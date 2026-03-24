@@ -128,6 +128,12 @@ AGGRESSIVE_ACCEPT_DEFAULT_POLICY = {
 }
 
 
+DEFAULT_POLICY_FILES = {
+    "frontier_pure_model": "configs/search_policy_frontier_pure_model.json",
+    "leaderboard_eval": "configs/search_policy_leaderboard_eval.json",
+}
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -321,8 +327,55 @@ def repo_relative_path(path: Path | None) -> str | None:
         return str(path)
 
 
+def deep_merge_dicts(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(base)
+    for key, value in override.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = deep_merge_dicts(dict(merged[key]), value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def resolve_policy_path(*, lane: str | None = None, policy_json: Path | None = None) -> Path | None:
+    if policy_json is not None:
+        return policy_json
+    if lane is None:
+        return None
+    rel = DEFAULT_POLICY_FILES.get(lane)
+    if rel is None:
+        raise ValueError(f"unknown autoresearch lane: {lane}")
+    return repo_root() / rel
+
+
+def load_policy_override(*, lane: str | None = None, policy_json: Path | None = None) -> dict[str, Any]:
+    resolved = resolve_policy_path(lane=lane, policy_json=policy_json)
+    if resolved is None:
+        return {}
+    if not resolved.is_file():
+        raise ValueError(f"missing search policy file: {resolved}")
+    payload = load_json(resolved)
+    payload.setdefault("lane", lane)
+    return payload
+
+
+def build_search_policy(*, lane: str | None = None, policy_json: Path | None = None, tracked_policy: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    base = default_search_policy()
+    if tracked_policy:
+        base = deep_merge_dicts(base, tracked_policy)
+    override = load_policy_override(lane=lane, policy_json=policy_json)
+    if override:
+        base = deep_merge_dicts(base, override)
+    if lane:
+        base["lane"] = lane
+    else:
+        base.setdefault("lane", "default")
+    return base
+
+
 def default_search_policy() -> dict[str, Any]:
     return {
+        "lane": "default",
         "min_meaningful_bpb_gain": SEARCH_MIN_MEANINGFUL_BPB_GAIN,
         "artifact_target_bytes_min": SEARCH_ARTIFACT_TARGET_BYTES_MIN,
         "artifact_target_bytes_max": SEARCH_ARTIFACT_TARGET_BYTES_MAX,
@@ -330,6 +383,42 @@ def default_search_policy() -> dict[str, Any]:
         "max_consecutive_same_family_runs": SEARCH_MAX_CONSECUTIVE_SAME_FAMILY,
         "story_selection_mode": "one_story_per_iteration",
         "allow_train_py_module_writes": True,
+        "discovery_mode": "mixed",
+        "refinement_gate": {
+            "contender_bpb_gap": 0.015,
+            "require_ranking_valid": True,
+            "prefer_post_quant_refine": True,
+        },
+        "preflight": {
+            "enabled": False,
+            "benchmark_train_steps": 2,
+            "min_train_tokens_per_second_ratio": 0.9,
+            "min_total_tokens_ratio": 0.8,
+            "hard_artifact_bytes_max": 16_000_000,
+            "soft_artifact_bytes_max": 15_950_000,
+            "soft_artifact_bytes_min": 14_000_000,
+            "allow_slow_if_within_soft_cap": True,
+            "allow_slow_if_artifact_gain_bytes": 750_000,
+            "no_lawa": True,
+            "no_eval_first_step": True,
+            "disable_reload_verify": True,
+            "preflight_exit_code": 10,
+        },
+        "creative_guardrails": {
+            "treat_public_frontier_as_prior_not_recipe": True,
+            "avoid_exact_public_architecture_cloning": True,
+            "prefer_clean_isolated_stories": True,
+        },
+        "train_config_preferences": {
+            "config_transform_profile": "manual",
+            "preferred_local_knobs": [
+                "rope_fraction",
+                "mlp_activation",
+                "residual_scale_init",
+                "quant.named_low_bit_rules",
+                "quant.clip_percentile_overrides",
+            ],
+        },
         "structural_axes": list(SEARCH_STRUCTURAL_AXES),
         "external_priors": list(SEARCH_EXTERNAL_PRIORS),
         "next_priority_axes": list(SEARCH_NEXT_PRIORITY_AXES),
@@ -519,7 +608,7 @@ def ensure_loop_support_files(state_dir: Path) -> None:
             path.write_text("", encoding="utf-8")
 
 
-def init_session(state_dir: Path, baseline_results_path: Path, force: bool = False) -> dict[str, Any]:
+def init_session(state_dir: Path, baseline_results_path: Path, force: bool = False, *, lane: str | None = None, policy_json: Path | None = None) -> dict[str, Any]:
     state_dir.mkdir(parents=True, exist_ok=True)
     path = session_path(state_dir)
     if path.exists() and not force:
@@ -559,12 +648,7 @@ def init_session(state_dir: Path, baseline_results_path: Path, force: bool = Fal
         "latest_artifact_bytes": baseline["artifact_bytes"],
         "latest_decision": "accepted",
         "current_experiment": None,
-        "search_policy": {
-            "min_meaningful_bpb_gain": SEARCH_MIN_MEANINGFUL_BPB_GAIN,
-            "artifact_target_bytes_min": SEARCH_ARTIFACT_TARGET_BYTES_MIN,
-            "artifact_target_bytes_max": SEARCH_ARTIFACT_TARGET_BYTES_MAX,
-            **default_search_policy(),
-        },
+        "search_policy": build_search_policy(lane=lane, policy_json=policy_json),
     }
     write_session(state_dir, session)
     ensure_notes_file(state_dir)
@@ -589,7 +673,7 @@ def init_session(state_dir: Path, baseline_results_path: Path, force: bool = Fal
     return load_session(state_dir)
 
 
-def init_session_from_tracked(state_dir: Path, tracked_state_path_value: Path, force: bool = False) -> dict[str, Any]:
+def init_session_from_tracked(state_dir: Path, tracked_state_path_value: Path, force: bool = False, *, lane: str | None = None, policy_json: Path | None = None) -> dict[str, Any]:
     state_dir.mkdir(parents=True, exist_ok=True)
     path = session_path(state_dir)
     if path.exists() and not force:
@@ -626,7 +710,7 @@ def init_session_from_tracked(state_dir: Path, tracked_state_path_value: Path, f
         "latest_artifact_bytes": tracked["accepted_artifact_bytes"],
         "latest_decision": "accepted",
         "current_experiment": None,
-        "search_policy": tracked.get("search_policy") or default_search_policy(),
+        "search_policy": build_search_policy(lane=lane, policy_json=policy_json, tracked_policy=tracked.get("search_policy")),
         "tracked_accepted_state_path": str(tracked_state_path_value),
     }
     write_session(state_dir, session)
@@ -824,10 +908,14 @@ def main() -> None:
 
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--baseline_results", type=str, required=True)
+    init_parser.add_argument("--lane", type=str, default=None)
+    init_parser.add_argument("--policy_json", type=str, default=None)
     init_parser.add_argument("--force", action="store_true")
 
     tracked_init_parser = subparsers.add_parser("init-from-tracked")
     tracked_init_parser.add_argument("--tracked_state", type=str, required=True)
+    tracked_init_parser.add_argument("--lane", type=str, default=None)
+    tracked_init_parser.add_argument("--policy_json", type=str, default=None)
     tracked_init_parser.add_argument("--force", action="store_true")
 
     subparsers.add_parser("require-ready")
@@ -860,10 +948,10 @@ def main() -> None:
     state_dir = Path(args.state_dir)
 
     if args.command == "init":
-        print_payload(init_session(state_dir, Path(args.baseline_results), force=args.force))
+        print_payload(init_session(state_dir, Path(args.baseline_results), force=args.force, lane=args.lane, policy_json=None if args.policy_json is None else Path(args.policy_json)))
         return
     if args.command == "init-from-tracked":
-        print_payload(init_session_from_tracked(state_dir, Path(args.tracked_state), force=args.force))
+        print_payload(init_session_from_tracked(state_dir, Path(args.tracked_state), force=args.force, lane=args.lane, policy_json=None if args.policy_json is None else Path(args.policy_json)))
         return
     if args.command == "require-ready":
         print_payload(require_ready(state_dir))
