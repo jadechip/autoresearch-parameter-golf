@@ -43,7 +43,9 @@ CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 export CUBLAS_WORKSPACE_CONFIG
 export PYTHONUNBUFFERED=1
 
-uv sync --frozen --extra dev --extra tokenizer
+if [[ "${SKIP_UV_SYNC:-1}" != "1" ]]; then
+  uv sync --frozen --extra dev --extra tokenizer
+fi
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Missing virtualenv python: $PYTHON_BIN" >&2

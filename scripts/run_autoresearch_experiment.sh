@@ -83,7 +83,7 @@ PY
     return 0
   fi
 
-  local benchmark_train_steps no_lawa no_eval_first disable_reload_verify preflight_exit_code
+  local benchmark_train_steps no_lawa no_eval_first disable_reload_verify train_phase_only preflight_exit_code
   benchmark_train_steps="$($PYTHON_BIN - <<'PY' "$SESSION_JSON"
 import json, sys
 policy = (json.load(open(sys.argv[1], 'r', encoding='utf-8')).get('search_policy') or {}).get('preflight') or {}
@@ -108,6 +108,12 @@ policy = (json.load(open(sys.argv[1], 'r', encoding='utf-8')).get('search_policy
 print('1' if policy.get('disable_reload_verify', True) else '0')
 PY
 )"
+  train_phase_only="$($PYTHON_BIN - <<'PY' "$SESSION_JSON"
+import json, sys
+policy = (json.load(open(sys.argv[1], 'r', encoding='utf-8')).get('search_policy') or {}).get('preflight') or {}
+print('1' if policy.get('train_phase_only', True) else '0')
+PY
+)"
   preflight_exit_code="$($PYTHON_BIN - <<'PY' "$SESSION_JSON"
 import json, sys
 policy = (json.load(open(sys.argv[1], 'r', encoding='utf-8')).get('search_policy') or {}).get('preflight') or {}
@@ -126,6 +132,9 @@ PY
   fi
   if [[ "$disable_reload_verify" == "1" ]]; then
     benchmark_args+=(--no_verify_export_reload)
+  fi
+  if [[ "$train_phase_only" == "1" ]]; then
+    benchmark_args+=(--train_phase_only)
   fi
 
   CONFIG_JSON="$CONFIG_JSON" \
