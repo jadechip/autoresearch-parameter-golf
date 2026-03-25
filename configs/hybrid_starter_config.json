@@ -1,0 +1,162 @@
+{
+  "train_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin",
+  "val_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin",
+  "tokenizer_path": "./data/tokenizers/fineweb_1024_bpe.model",
+  "output_dir": "./runs/autoresearch_5090/record_inspired_hybrid_starter",
+  "run_name": null,
+  "results_tsv_path": "./runs/autoresearch_5090/results.tsv",
+  "seed": 1337,
+  "deterministic": true,
+  "iterations": 200000,
+  "train_batch_tokens": 147456,
+  "val_batch_tokens": 147456,
+  "grad_accum_steps": 4,
+  "log_every": 10,
+  "val_every": 0,
+  "eval_first_step": false,
+  "max_wallclock_seconds": 300.0,
+  "checkpoint_every": 0,
+  "resume_from": null,
+  "use_compile": false,
+  "use_lawa": false,
+  "lawa_last_n_steps": 100,
+  "save_final_quantized": true,
+  "verify_export_reload": false,
+  "evaluate_only": false,
+  "load_artifact_path": null,
+  "benchmark_only": false,
+  "benchmark_train_steps": 3,
+  "benchmark_eval_repeats": 1,
+  "counted_code_paths": [
+    "train.py"
+  ],
+  "artifact_bundle_name": "submission_bundle",
+  "config_transform_profile": "manual",
+  "model": {
+    "vocab_size": 1024,
+    "seq_len": 768,
+    "d_model": 512,
+    "num_heads": 8,
+    "num_kv_heads": 4,
+    "mlp_mult": 3,
+    "non_recurrent_mlp_hidden_bonus": 256,
+    "shared_mlp_hidden_bonus": 128,
+    "rope_base": 10000.0,
+    "rope_fraction": 0.25,
+    "mlp_activation": "leakyrelu2",
+    "mlp_leak": 0.5,
+    "residual_scale_init": 1.0,
+    "logit_softcap": 30.0,
+    "tie_embeddings": true,
+    "emb_init_std": 0.02,
+    "stem_layers": 1,
+    "shared_layers": 2,
+    "recurrence_loops": 2,
+    "tail_layers": 5,
+    "adapter_rank": 8,
+    "adapter_alpha": 16.0,
+    "adapter_targets": [
+      "attn_out",
+      "mlp_out"
+    ],
+    "qk_gain_init": 1.0,
+    "q_low_rank": 0,
+    "shared_q_low_rank": 128,
+    "final_tail_q_low_rank": 0,
+    "fake_quant_during_train": true,
+    "attn_fake_quant_during_train": false,
+    "shared_mlp_fake_quant_during_train": true,
+    "final_tail_mlp_fake_quant_during_train": false,
+    "fake_quant_start_step": 20,
+    "attn_dropout": 0.0,
+    "resid_dropout": 0.0,
+    "depth_damped_residual_init": true,
+    "depth_damped_residual_power": 0.5
+  },
+  "optim": {
+    "embed_lr": 0.003,
+    "head_lr": 0.003,
+    "matrix_lr": 0.012,
+    "scalar_lr": 0.003,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "adam_eps": 1e-08,
+    "weight_decay": 0.04,
+    "muon_momentum": 0.99,
+    "muon_backend_steps": 5,
+    "grad_clip_norm": 0.3,
+    "warmup_steps": 20,
+    "warmdown_steps": 80,
+    "min_lr_scale": 0.1
+  },
+  "quant": {
+    "keep_float_max_numel": 65536,
+    "keep_float_name_patterns": [
+      "norm",
+      "scale",
+      "gain",
+      "adapter",
+      "lm_head",
+      "tok_emb",
+      "tail.4.attn.k_proj.weight"
+    ],
+    "scale_store_dtype": "torch.float16",
+    "keep_float_store_dtype": "torch.float16",
+    "clip_percentile": 99.95,
+    "clip_percentile_overrides": [
+      {
+        "pattern": "mlp.fc.weight",
+        "clip_percentile": 99.9
+      },
+      {
+        "pattern": "mlp.proj.weight",
+        "clip_percentile": 99.9
+      },
+      {
+        "pattern": "q_proj.weight",
+        "clip_percentile": 99.95
+      },
+      {
+        "pattern": "k_proj.weight",
+        "clip_percentile": 99.97
+      },
+      {
+        "pattern": "v_proj.weight",
+        "clip_percentile": 99.95
+      },
+      {
+        "pattern": "out_proj.weight",
+        "clip_percentile": 99.95
+      }
+    ],
+    "low_bit_name_patterns": [],
+    "low_bit_bits": 8,
+    "named_low_bit_rules": [
+      {
+        "pattern": "mlp.fc.weight",
+        "bits": 5
+      },
+      {
+        "pattern": "mlp.proj.weight",
+        "bits": 5
+      },
+      {
+        "pattern": "q_proj.weight",
+        "bits": 6
+      },
+      {
+        "pattern": "k_proj.weight",
+        "bits": 6
+      },
+      {
+        "pattern": "v_proj.weight",
+        "bits": 6
+      },
+      {
+        "pattern": "out_proj.weight",
+        "bits": 6
+      }
+    ],
+    "zlib_level": 9
+  }
+}

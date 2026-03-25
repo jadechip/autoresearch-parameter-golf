@@ -114,6 +114,8 @@ class ModelConfig:
     mlp_activation: str = "relu2"
     mlp_leak: float = 0.01
     residual_scale_init: float = 1.0
+    depth_damped_residual_init: bool = False
+    depth_damped_residual_power: float = 0.5
     logit_softcap: float = 30.0
     tie_embeddings: bool = True
     emb_init_std: float = 0.02
@@ -2406,11 +2408,40 @@ class RecurrentGPT(nn.Module):
             fake_quant_start_step=cfg.fake_quant_start_step,
         )
         self._reset_parameters()
+        if self.cfg.depth_damped_residual_init:
+            self._apply_depth_damped_residual_init()
 
     def _reset_parameters(self) -> None:
         nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.cfg.emb_init_std)
         if self.lm_head is not None:
             nn.init.zeros_(self.lm_head.weight)
+
+    def _depth_damped_scale(self, depth_idx: int) -> float:
+        return float(self.cfg.residual_scale_init) / float((depth_idx + 1) ** self.cfg.depth_damped_residual_power)
+
+    def _fill_block_residual_scales(self, block: TransformerBlock, value: float, slot: int | None) -> None:
+        with torch.no_grad():
+            if block.attn_scale.ndim == 2:
+                if slot is None:
+                    raise RuntimeError("per-loop residual scale initialization requires a loop slot")
+                block.attn_scale[slot].fill_(value)
+                block.mlp_scale[slot].fill_(value)
+            else:
+                block.attn_scale.fill_(value)
+                block.mlp_scale.fill_(value)
+
+    def _apply_depth_damped_residual_init(self) -> None:
+        depth_idx = 0
+        for block in self.stem:
+            self._fill_block_residual_scales(block, self._depth_damped_scale(depth_idx), slot=None)
+            depth_idx += 1
+        for loop_idx in range(self.cfg.recurrence_loops):
+            for block in self.shared:
+                self._fill_block_residual_scales(block, self._depth_damped_scale(depth_idx), slot=loop_idx)
+                depth_idx += 1
+        for block in self.tail:
+            self._fill_block_residual_scales(block, self._depth_damped_scale(depth_idx), slot=None)
+            depth_idx += 1
 
     def set_global_step(self, step: int) -> None:
         if self.lm_head is not None:
@@ -3321,6 +3352,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ConfigError("mlp_leak must be in [0, 1]")
     if cfg.model.residual_scale_init < 0.0:
         raise ConfigError("residual_scale_init must be >= 0")
+    if cfg.model.depth_damped_residual_power < 0.0:
+        raise ConfigError("depth_damped_residual_power must be >= 0")
     if cfg.model.non_recurrent_mlp_hidden_bonus is not None and cfg.model.non_recurrent_mlp_hidden_bonus < 0:
         raise ConfigError("non_recurrent_mlp_hidden_bonus must be >= 0 when set")
     if cfg.model.shared_mlp_hidden_bonus < 0:
@@ -4082,6 +4115,9 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--mlp_activation", type=str, default=None)
     parser.add_argument("--mlp_leak", type=float, default=None)
     parser.add_argument("--residual_scale_init", type=float, default=None)
+    parser.add_argument("--depth_damped_residual_power", type=float, default=None)
+    parser.add_argument("--depth_damped_residual_init", action="store_true")
+    parser.add_argument("--no_depth_damped_residual_init", action="store_true")
     parser.add_argument("--vocab_size", type=int, default=None)
     parser.add_argument("--d_model", type=int, default=None)
     parser.add_argument("--num_heads", type=int, default=None)
@@ -4175,6 +4211,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         "rope_fraction",
         "mlp_leak",
         "residual_scale_init",
+        "depth_damped_residual_power",
     ]:
         value = getattr(args, name)
         if value is not None:
@@ -4194,6 +4231,10 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         cfg.model.mlp_activation = args.mlp_activation
     if args.config_transform_profile is not None:
         cfg.config_transform_profile = args.config_transform_profile
+    if args.depth_damped_residual_init:
+        cfg.model.depth_damped_residual_init = True
+    if args.no_depth_damped_residual_init:
+        cfg.model.depth_damped_residual_init = False
 
     if args.clip_percentile is not None:
         cfg.quant.clip_percentile = args.clip_percentile
