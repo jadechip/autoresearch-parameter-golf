@@ -137,6 +137,16 @@ DEFAULT_POLICY_FILES = {
     "frontier_pure_model": "configs/search_policy_frontier_pure_model.json",
     "leaderboard_eval": "configs/search_policy_leaderboard_eval.json",
 }
+RESULTS_SEARCH_ROOTS = (
+    "runs/autoresearch_5090",
+    "runs/autoresearch_5090_aggressive",
+)
+RESULTS_INDEX_NAMES = (
+    "best_raw.json",
+    "best.json",
+    "best_valid.json",
+    "latest.json",
+)
 
 
 def repo_root() -> Path:
@@ -230,6 +240,67 @@ def resolve_results_source(path: Path) -> Path:
     if indexed_source:
         return Path(str(indexed_source))
     return path
+
+
+def resolve_repo_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return repo_root() / path
+
+
+def resolve_valid_results_path(path_value: str | Path | None) -> Path | None:
+    if path_value is None:
+        return None
+    candidate = resolve_repo_path(Path(str(path_value)))
+    if not candidate.is_file():
+        return None
+    try:
+        resolved = resolve_results_source(candidate)
+    except Exception:
+        return None
+    resolved = resolve_repo_path(resolved)
+    if not resolved.is_file():
+        return None
+    try:
+        load_and_validate_results(resolved)
+    except Exception:
+        return None
+    return resolved
+
+
+def recover_results_path_from_run_id(run_id: str | None) -> Path | None:
+    if not run_id:
+        return None
+
+    for root_rel in RESULTS_SEARCH_ROOTS:
+        candidate = resolve_valid_results_path(repo_root() / root_rel / "runs" / str(run_id) / "results.json")
+        if candidate is not None:
+            return candidate
+
+    for root_rel in RESULTS_SEARCH_ROOTS:
+        index_dir = repo_root() / root_rel / "index"
+        for index_name in RESULTS_INDEX_NAMES:
+            index_path = index_dir / index_name
+            if not index_path.is_file():
+                continue
+            try:
+                payload = load_json(index_path)
+            except Exception:
+                continue
+            if str(payload.get("run_id") or "") != str(run_id):
+                continue
+            source_path = payload.get("indexed_source_results_path") or payload.get("results_path")
+            candidate = resolve_valid_results_path(source_path)
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def resolve_or_recover_results_path(path_value: str | Path | None, run_id: str | None = None) -> Path | None:
+    resolved = resolve_valid_results_path(path_value)
+    if resolved is not None:
+        return resolved
+    return recover_results_path_from_run_id(run_id)
 
 
 def load_session(state_dir: Path) -> dict[str, Any]:
@@ -330,6 +401,10 @@ def repo_relative_path(path: Path | None) -> str | None:
         return str(path.relative_to(repo_root()))
     except ValueError:
         return str(path)
+
+
+def portable_path_value(path: Path | None) -> str | None:
+    return repo_relative_path(path)
 
 
 def deep_merge_dicts(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -527,6 +602,10 @@ def sync_tracked_accepted_state(
     resolved_results: Path | None = None,
     results: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    effective_results_path = resolve_or_recover_results_path(
+        resolved_results if resolved_results is not None else session.get("accepted_results_path"),
+        None if session.get("accepted_run_id") is None else str(session.get("accepted_run_id")),
+    )
     accepted_payload: dict[str, Any] = {
         "schema_version": TRACKED_ACCEPTED_STATE_SCHEMA_VERSION,
         "updated_at_unix": time.time(),
@@ -538,7 +617,7 @@ def sync_tracked_accepted_state(
         "accepted_run_id": session.get("accepted_run_id"),
         "accepted_val_bpb": session.get("accepted_val_bpb"),
         "accepted_artifact_bytes": session.get("accepted_artifact_bytes"),
-        "accepted_results_path": None if resolved_results is None else str(resolved_results),
+        "accepted_results_path": portable_path_value(effective_results_path),
         "search_policy": dict(session.get("search_policy") or default_search_policy()),
     }
 
@@ -655,13 +734,13 @@ def init_session(state_dir: Path, baseline_results_path: Path, force: bool = Fal
         "accepted_run_id": baseline["run_id"],
         "accepted_val_bpb": baseline["val_bpb"],
         "accepted_artifact_bytes": baseline["artifact_bytes"],
-        "accepted_results_path": str(resolved_results),
+        "accepted_results_path": portable_path_value(resolved_results),
         "baseline_run_id": baseline["run_id"],
         "baseline_val_bpb": baseline["val_bpb"],
         "baseline_artifact_bytes": baseline["artifact_bytes"],
-        "baseline_results_path": str(resolved_results),
+        "baseline_results_path": portable_path_value(resolved_results),
         "latest_run_id": baseline["run_id"],
-        "latest_results_path": str(resolved_results),
+        "latest_results_path": portable_path_value(resolved_results),
         "latest_status": baseline["status"],
         "latest_val_bpb": baseline["val_bpb"],
         "latest_artifact_bytes": baseline["artifact_bytes"],
@@ -703,7 +782,14 @@ def init_session_from_tracked(state_dir: Path, tracked_state_path_value: Path, f
     commit = current_commit()
     commit_short = current_commit_short()
     now = time.time()
-    accepted_results_path = tracked.get("accepted_results_path")
+    accepted_results = resolve_or_recover_results_path(tracked.get("accepted_results_path"), str(tracked["accepted_run_id"]))
+    if accepted_results is None:
+        raise ValueError(
+            "tracked accepted state does not resolve to a local accepted results.json. "
+            f"accepted_run_id={tracked['accepted_run_id']} tracked_state={tracked_state_path_value}. "
+            "Re-seed with BASELINE_RESULTS=<local train index json> FORCE=1 bash scripts/init_autoresearch_session.sh"
+        )
+    accepted_results_path = portable_path_value(accepted_results)
     session = {
         "schema_version": SESSION_SCHEMA_VERSION,
         "status": "ready",
@@ -828,7 +914,7 @@ def finish_run(state_dir: Path, results_json: Path) -> dict[str, Any]:
     session["status"] = "ready"
     session["current_branch"] = branch
     session["latest_run_id"] = results["run_id"]
-    session["latest_results_path"] = str(resolved_results)
+    session["latest_results_path"] = portable_path_value(resolved_results)
     session["latest_status"] = results["status"]
     session["latest_val_bpb"] = results["val_bpb"]
     session["latest_artifact_bytes"] = results["artifact_bytes"]
@@ -892,7 +978,7 @@ def decide_run(state_dir: Path, run_id: str, decision: str, results_json: Path |
         if results is not None:
             session["accepted_val_bpb"] = results["val_bpb"]
             session["accepted_artifact_bytes"] = results["artifact_bytes"]
-            session["accepted_results_path"] = str(resolved_results)
+            session["accepted_results_path"] = portable_path_value(resolved_results)
     write_session(state_dir, session)
     if decision == "accepted":
         sync_tracked_accepted_state(session, resolved_results=resolved_results, results=results)
@@ -906,11 +992,10 @@ def sync_current_tracked_accepted_state(state_dir: Path, results_json: Path | No
     if results_json is not None:
         resolved_results = resolve_results_source(results_json)
     else:
-        accepted_results_path = session.get("accepted_results_path")
-        if accepted_results_path:
-            candidate = Path(str(accepted_results_path))
-            if candidate.is_file():
-                resolved_results = resolve_results_source(candidate)
+        resolved_results = resolve_or_recover_results_path(
+            session.get("accepted_results_path"),
+            None if session.get("accepted_run_id") is None else str(session.get("accepted_run_id")),
+        )
     if resolved_results is not None and resolved_results.is_file():
         try:
             results = dict(load_and_validate_results(resolved_results))
