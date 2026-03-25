@@ -51,6 +51,18 @@ jq . runs/minimal_autoresearch_5090/last_run.json
 tail -n 20 runs/minimal_autoresearch_5090/results.tsv
 ```
 
+Dynamic prompt context:
+- if [`parameter_golf_agent_context_capsule.md`](parameter_golf_agent_context_capsule.md) exists, `run_once.sh` appends it automatically to the per-iteration prompt
+- you can override or extend that with `PROMPT_CONTEXT_FILES`, using a `:`-separated list of file paths
+- each iteration writes the fully assembled prompt to `.minimal_autoresearch/runs/codex-minimal-iteration-*.prompt.md`
+
+Example:
+
+```bash
+PROMPT_CONTEXT_FILES="minimal_autoresearch/parameter_golf_agent_context_capsule.md:notes/extra_direction.md" \
+bash minimal_autoresearch/run_once.sh
+```
+
 Acceptance rule:
 - candidate must be `status=success`
 - candidate must be `mode=train`
