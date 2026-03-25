@@ -7,6 +7,7 @@ What it does:
 - runs one Codex-guided experiment at a time
 - trains exactly one candidate with `scripts/runpod_5090_train.sh`
 - records every attempt in `.minimal_autoresearch/attempts.jsonl`
+- freezes the evaluation protocol in state and enforces it at launch
 - keeps the experiment commit if the run beats the current accepted result
 - otherwise adds a normal revert commit
 
@@ -53,8 +54,14 @@ tail -n 20 runs/minimal_autoresearch_5090/results.tsv
 Acceptance rule:
 - candidate must be `status=success`
 - candidate must be `mode=train`
+- candidate must match the frozen protocol stored in `.minimal_autoresearch/state.json`
 - candidate artifact must stay under the hard cap
-- candidate training time should stay within a reasonable ratio of its configured budget
+- candidate train-loop time should stay within a reasonable ratio of the frozen wallclock budget
 - candidate `val_bpb` must beat the current accepted `val_bpb` by at least the configured minimum improvement
 
 Lower `val_bpb` is better.
+
+Frozen protocol:
+- the minimal loop does not let Codex change the evaluation budget, dataset/tokenizer inputs, validation mode, or other protected launch fields
+- `run_experiment.sh` materializes a launch config with those protected fields enforced before training starts
+- if a produced run drifts on protected fields, `state.py assess` rejects it with `protocol_drift`

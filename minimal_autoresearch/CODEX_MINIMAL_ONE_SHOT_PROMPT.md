@@ -22,6 +22,7 @@ Rules:
 - do exactly one experiment cycle
 - make one coherent hypothesis, not a grab bag of unrelated changes
 - you may edit multiple files if needed, but keep the story interpretable
+- the evaluation protocol is frozen by `.minimal_autoresearch/state.json`; do not try to change wallclock budget, dataset/tokenizer inputs, validation mode, or other protected launch fields to win
 - do not edit minimal_autoresearch/*.sh or minimal_autoresearch/state.py unless blocked by a clear bug in the minimal loop itself
 - do not edit dependencies or dataset assets
 - do not use git reset --hard

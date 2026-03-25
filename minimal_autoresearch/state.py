@@ -22,6 +22,55 @@ DEFAULT_MIN_IMPROVEMENT = 0.0005
 DEFAULT_ARTIFACT_HARD_MAX = 16_000_000
 DEFAULT_TRAINING_SECONDS_MIN_RATIO = 0.70
 DEFAULT_TRAINING_SECONDS_MAX_RATIO = 1.40
+PROTECTED_CONFIG_FIELDS = (
+    "max_wallclock_seconds",
+    "iterations",
+    "train_pattern",
+    "val_pattern",
+    "tokenizer_path",
+    "train_batch_tokens",
+    "val_batch_tokens",
+    "grad_accum_steps",
+    "seed",
+    "deterministic",
+    "val_every",
+    "eval_first_step",
+    "benchmark_only",
+    "benchmark_train_steps",
+    "benchmark_eval_repeats",
+    "checkpoint_every",
+    "use_compile",
+    "use_lawa",
+    "save_final_quantized",
+    "verify_export_reload",
+    "counted_code_paths",
+    "resume_from",
+    "load_artifact_path",
+    "evaluate_only",
+    "train_phase_only",
+)
+PROTECTED_PATH_FIELDS = frozenset(
+    {
+        "train_pattern",
+        "val_pattern",
+        "tokenizer_path",
+        "resume_from",
+        "load_artifact_path",
+    }
+)
+BOOLEAN_PROTOCOL_FIELDS = frozenset(
+    {
+        "deterministic",
+        "eval_first_step",
+        "benchmark_only",
+        "use_compile",
+        "use_lawa",
+        "save_final_quantized",
+        "verify_export_reload",
+        "evaluate_only",
+        "train_phase_only",
+    }
+)
 
 
 def repo_root() -> Path:
@@ -84,8 +133,66 @@ def resolve_results_source(path_value: str | Path) -> Path:
     return path
 
 
+def normalize_repoish_path(value: str | Path) -> str:
+    text = str(value)
+    if text.startswith("./"):
+        text = text[2:]
+    candidate = Path(text)
+    if candidate.is_absolute():
+        try:
+            return str(candidate.relative_to(repo_root()))
+        except ValueError:
+            marker = f"/{repo_root().name}/"
+            if marker in text:
+                return text.split(marker, 1)[1]
+    return text
+
+
+def normalize_protocol_value(field: str, value: Any) -> Any:
+    if field in BOOLEAN_PROTOCOL_FIELDS and value is None:
+        return False
+    if field in PROTECTED_PATH_FIELDS:
+        if value is None:
+            return None
+        return normalize_repoish_path(value)
+    if field == "counted_code_paths":
+        if value is None:
+            return None
+        return [normalize_repoish_path(item) for item in value]
+    return value
+
+
+def build_protocol_from_config_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        field: normalize_protocol_value(field, config_payload.get(field))
+        for field in PROTECTED_CONFIG_FIELDS
+    }
+
+
+def load_protocol_from_config_json(config_json: str | Path) -> tuple[dict[str, Any], Path]:
+    resolved_config = resolve_repo_path(config_json)
+    if not resolved_config.is_file():
+        raise ValueError(f"missing config json: {resolved_config}")
+    return build_protocol_from_config_payload(load_json(resolved_config)), resolved_config
+
+
+def protocol_from_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    protocol = state.get("protocol")
+    if isinstance(protocol, Mapping):
+        return {
+            field: normalize_protocol_value(field, protocol.get(field))
+            for field in PROTECTED_CONFIG_FIELDS
+        }
+    config_json = state.get("config_json")
+    if not config_json:
+        raise ValueError("minimal autoresearch state missing protocol and config_json")
+    protocol, _resolved = load_protocol_from_config_json(str(config_json))
+    return protocol
+
+
 def load_and_validate_results(path_value: str | Path) -> Mapping[str, Any]:
-    payload = load_json(resolve_repo_path(path_value))
+    resolved_path = resolve_repo_path(path_value)
+    payload = load_json(resolved_path)
     required = {
         "schema_version": str,
         "status": str,
@@ -103,7 +210,59 @@ def load_and_validate_results(path_value: str | Path) -> Mapping[str, Any]:
             raise ValueError(f"results.json missing required key: {key}")
         if not isinstance(payload[key], expected):
             raise ValueError(f"results.json key {key!r} has invalid type: {type(payload[key]).__name__}")
+    payload["_resolved_results_source_path"] = str(resolved_path)
     return payload
+
+
+def load_results_config(results: Mapping[str, Any]) -> tuple[dict[str, Any] | None, Path | None]:
+    config_path_value = results.get("config_path")
+    source_path_value = results.get("_resolved_results_source_path")
+    if not config_path_value:
+        if source_path_value:
+            sibling_path = Path(str(source_path_value)).parent / "config.json"
+            if sibling_path.is_file():
+                return load_json(sibling_path), sibling_path
+        return None, None
+    config_path = resolve_repo_path(str(config_path_value))
+    if not config_path.is_file() and source_path_value:
+        sibling_path = Path(str(source_path_value)).parent / "config.json"
+        if sibling_path.is_file():
+            config_path = sibling_path
+    if not config_path.is_file():
+        return None, config_path
+    try:
+        return load_json(config_path), config_path
+    except Exception:
+        return None, config_path
+
+
+def load_train_loop_seconds(results: Mapping[str, Any]) -> float | None:
+    metrics_path_value = results.get("metrics_path")
+    source_path_value = results.get("_resolved_results_source_path")
+    metrics_path: Path | None = None
+    if metrics_path_value:
+        metrics_path = resolve_repo_path(str(metrics_path_value))
+    if (metrics_path is None or not metrics_path.is_file()) and source_path_value:
+        sibling_path = Path(str(source_path_value)).parent / "metrics.jsonl"
+        if sibling_path.is_file():
+            metrics_path = sibling_path
+    if metrics_path is None or not metrics_path.is_file():
+        return None
+    last_elapsed: float | None = None
+    with metrics_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if payload.get("event") != "train":
+                continue
+            elapsed = payload.get("elapsed_training_seconds")
+            if elapsed is not None:
+                last_elapsed = float(elapsed)
+    return last_elapsed
 
 
 def git_output(args: list[str]) -> str:
@@ -163,21 +322,41 @@ def load_recent_attempts(state_dir: Path, limit: int) -> list[dict[str, Any]]:
     return [json.loads(line) for line in recent]
 
 
-def resolve_expected_training_seconds(results: Mapping[str, Any]) -> float | None:
-    config_path_value = results.get("config_path")
-    if not config_path_value:
-        return None
-    config_path = resolve_repo_path(str(config_path_value))
-    if not config_path.is_file():
-        return None
-    try:
-        config_payload = load_json(config_path)
-    except Exception:
-        return None
-    value = config_payload.get("max_wallclock_seconds")
+def resolve_expected_training_seconds(state: Mapping[str, Any]) -> float | None:
+    value = protocol_from_state(state).get("max_wallclock_seconds")
     if value is None:
         return None
     return float(value)
+
+
+def validate_results_protocol(state: Mapping[str, Any], results: Mapping[str, Any]) -> dict[str, Any]:
+    expected_protocol = protocol_from_state(state)
+    results_config, config_path = load_results_config(results)
+    if results_config is None:
+        return {
+            "valid": False,
+            "missing_config": True,
+            "run_config_path": None if config_path is None else repo_relative_path(config_path),
+            "mismatches": [],
+        }
+
+    mismatches: list[dict[str, Any]] = []
+    for field, expected_value in expected_protocol.items():
+        actual_value = normalize_protocol_value(field, results_config.get(field))
+        if actual_value != expected_value:
+            mismatches.append(
+                {
+                    "field": field,
+                    "expected": expected_value,
+                    "actual": actual_value,
+                }
+            )
+    return {
+        "valid": not mismatches,
+        "missing_config": False,
+        "run_config_path": None if config_path is None else repo_relative_path(config_path),
+        "mismatches": mismatches,
+    }
 
 
 def assess_results(state: Mapping[str, Any], results: Mapping[str, Any]) -> dict[str, Any]:
@@ -189,19 +368,29 @@ def assess_results(state: Mapping[str, Any], results: Mapping[str, Any]) -> dict
     artifact_bytes = results.get("artifact_bytes")
     hard_cap = int(state.get("artifact_bytes_hard_max", DEFAULT_ARTIFACT_HARD_MAX))
     min_improvement = float(state.get("min_improvement", DEFAULT_MIN_IMPROVEMENT))
-    expected_training_seconds = resolve_expected_training_seconds(results)
+    protocol_check = validate_results_protocol(state, results)
+    expected_training_seconds = resolve_expected_training_seconds(state)
     training_seconds = results.get("training_seconds")
+    train_loop_seconds = load_train_loop_seconds(results)
+    measured_training_seconds = train_loop_seconds
+    measured_training_seconds_source = "metrics.train.elapsed_training_seconds"
+    if measured_training_seconds is None:
+        measured_training_seconds = training_seconds
+        measured_training_seconds_source = "results.training_seconds"
+        if training_seconds is None:
+            warnings.append("missing_training_seconds")
+        else:
+            warnings.append("missing_train_loop_seconds")
+            warnings.append("using_summary_training_seconds")
     training_seconds_ratio = None
     training_budget_valid = True
-    if expected_training_seconds not in (None, 0.0) and training_seconds is not None:
-        training_seconds_ratio = float(training_seconds) / float(expected_training_seconds)
+    if expected_training_seconds not in (None, 0.0) and measured_training_seconds is not None:
+        training_seconds_ratio = float(measured_training_seconds) / float(expected_training_seconds)
         training_budget_valid = (
             float(state.get("training_seconds_min_ratio", DEFAULT_TRAINING_SECONDS_MIN_RATIO))
             <= training_seconds_ratio
             <= float(state.get("training_seconds_max_ratio", DEFAULT_TRAINING_SECONDS_MAX_RATIO))
         )
-    elif training_seconds is None:
-        warnings.append("missing_training_seconds")
 
     artifact_valid = artifact_bytes is not None and int(artifact_bytes) <= hard_cap
     if not artifact_valid:
@@ -212,6 +401,10 @@ def assess_results(state: Mapping[str, Any], results: Mapping[str, Any]) -> dict
         reasons.append("mode_not_train")
     if candidate_val_bpb is None:
         reasons.append("missing_val_bpb")
+    if protocol_check["missing_config"]:
+        reasons.append("missing_run_config")
+    elif not protocol_check["valid"]:
+        reasons.append("protocol_drift")
     if not training_budget_valid:
         reasons.append("training_budget_out_of_range")
 
@@ -235,8 +428,15 @@ def assess_results(state: Mapping[str, Any], results: Mapping[str, Any]) -> dict
         "artifact_valid": artifact_valid,
         "expected_training_seconds": expected_training_seconds,
         "training_seconds": training_seconds,
+        "train_loop_seconds": train_loop_seconds,
+        "measured_training_seconds": measured_training_seconds,
+        "measured_training_seconds_source": measured_training_seconds_source,
         "training_seconds_ratio": training_seconds_ratio,
         "training_budget_valid": training_budget_valid,
+        "protocol_valid": protocol_check["valid"],
+        "protocol_missing_config": protocol_check["missing_config"],
+        "protocol_run_config_path": protocol_check["run_config_path"],
+        "protocol_mismatches": protocol_check["mismatches"],
         "reasons": reasons,
         "warnings": warnings,
     }
@@ -256,6 +456,13 @@ def init_state(
     baseline = dict(load_and_validate_results(resolved_results))
     if baseline.get("status") != "success" or baseline.get("mode") != "train" or baseline.get("val_bpb") is None:
         raise ValueError("baseline results must be a successful train run with val_bpb")
+    protocol, resolved_config_json = load_protocol_from_config_json(config_json)
+    baseline_protocol_check = validate_results_protocol(
+        {"config_json": repo_relative_path(resolved_config_json), "protocol": protocol},
+        baseline,
+    )
+    if baseline_protocol_check["missing_config"] or not baseline_protocol_check["valid"]:
+        raise ValueError(f"baseline results do not match frozen protocol: {baseline_protocol_check}")
 
     now = time.time()
     payload = {
@@ -278,7 +485,8 @@ def init_state(
         "latest_status": baseline["status"],
         "latest_val_bpb": baseline["val_bpb"],
         "latest_decision": "accepted",
-        "config_json": config_json,
+        "config_json": repo_relative_path(resolved_config_json),
+        "protocol": protocol,
         "min_improvement": DEFAULT_MIN_IMPROVEMENT,
         "artifact_bytes_hard_max": DEFAULT_ARTIFACT_HARD_MAX,
         "training_seconds_min_ratio": DEFAULT_TRAINING_SECONDS_MIN_RATIO,
@@ -292,6 +500,7 @@ def init_state(
 def show_state(state_dir: Path, recent: int) -> dict[str, Any]:
     payload = load_state(state_dir)
     output = dict(payload)
+    output["protocol"] = protocol_from_state(payload)
     output["recent_attempts"] = load_recent_attempts(state_dir, recent)
     return output
 
@@ -338,6 +547,7 @@ def record_attempt(
         "val_bpb": None if results is None else results.get("val_bpb"),
         "artifact_bytes": None if results is None else results.get("artifact_bytes"),
         "training_seconds": None if results is None else results.get("training_seconds"),
+        "train_loop_seconds": None if assessment is None else assessment.get("train_loop_seconds"),
         "experiment_commit": experiment_commit,
         "revert_commit": revert_commit,
         "notes": notes,
