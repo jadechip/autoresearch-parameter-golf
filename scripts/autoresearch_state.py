@@ -12,7 +12,7 @@ import sys
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-from train import append_jsonl, atomic_write_json, load_and_validate_results
+from train import ResultsSchemaError, append_jsonl, atomic_write_json, load_and_validate_results
 
 
 SESSION_SCHEMA_VERSION = "pgolf.autoresearch_session.v1"
@@ -703,7 +703,7 @@ def init_session_from_tracked(state_dir: Path, tracked_state_path_value: Path, f
     commit = current_commit()
     commit_short = current_commit_short()
     now = time.time()
-    accepted_results_path = tracked.get("accepted_results_path") or str(tracked_state_path_value)
+    accepted_results_path = tracked.get("accepted_results_path")
     session = {
         "schema_version": SESSION_SCHEMA_VERSION,
         "status": "ready",
@@ -912,7 +912,13 @@ def sync_current_tracked_accepted_state(state_dir: Path, results_json: Path | No
             if candidate.is_file():
                 resolved_results = resolve_results_source(candidate)
     if resolved_results is not None and resolved_results.is_file():
-        results = dict(load_and_validate_results(resolved_results))
+        try:
+            results = dict(load_and_validate_results(resolved_results))
+        except ResultsSchemaError:
+            if results_json is not None:
+                raise
+            # Older tracked state may not carry a real accepted results path yet.
+            resolved_results = None
     return sync_tracked_accepted_state(session, resolved_results=resolved_results, results=results)
 
 
