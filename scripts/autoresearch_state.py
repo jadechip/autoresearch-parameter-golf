@@ -4,9 +4,14 @@ import argparse
 import json
 import subprocess
 import time
-from pathlib import Path
 from typing import Any, Mapping
 
+from pathlib import Path
+import sys
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 from train import append_jsonl, atomic_write_json, load_and_validate_results
 
 
@@ -383,7 +388,13 @@ def default_search_policy() -> dict[str, Any]:
         "max_consecutive_same_family_runs": SEARCH_MAX_CONSECUTIVE_SAME_FAMILY,
         "story_selection_mode": "one_story_per_iteration",
         "allow_train_py_module_writes": True,
-        "discovery_mode": "mixed",
+        "discovery_mode": "evidence_guided_feeder",
+        "experiment_style": {
+            "anchor_config_required": True,
+            "primary_novelty_axes": 1,
+            "max_macro_axis_changes": 2,
+            "prefer_budget_repair_before_new_family": True,
+        },
         "refinement_gate": {
             "contender_bpb_gap": 0.015,
             "require_ranking_valid": True,
@@ -393,21 +404,29 @@ def default_search_policy() -> dict[str, Any]:
             "enabled": False,
             "benchmark_train_steps": 2,
             "min_train_tokens_per_second_ratio": 0.9,
-            "min_total_tokens_ratio": 0.8,
+            "min_total_tokens_ratio": None,
+            "require_train_tokens_per_second_ratio": True,
+            "require_projected_total_tokens_ratio": False,
             "hard_artifact_bytes_max": 16_000_000,
             "soft_artifact_bytes_max": 15_950_000,
-            "soft_artifact_bytes_min": 14_000_000,
+            "soft_artifact_bytes_min": 14_500_000,
             "allow_slow_if_within_soft_cap": True,
             "allow_slow_if_artifact_gain_bytes": 750_000,
+            "use_projected_artifact_gate": True,
+            "strict_projected_artifact_hard_cap": True,
+            "projected_artifact_margin_bytes": 250_000,
             "no_lawa": True,
             "no_eval_first_step": True,
             "disable_reload_verify": True,
+            "train_phase_only": True,
             "preflight_exit_code": 10,
         },
         "creative_guardrails": {
             "treat_public_frontier_as_prior_not_recipe": True,
             "avoid_exact_public_architecture_cloning": True,
             "prefer_clean_isolated_stories": True,
+            "one_primary_novelty_per_run": True,
+            "prefer_stable_frontier_seed_over_wholesale_rebuild": True,
         },
         "train_config_preferences": {
             "config_transform_profile": "manual",

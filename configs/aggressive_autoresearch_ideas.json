@@ -1,9 +1,9 @@
 {
-  "schema_version": "pgolf.aggressive_ideas.v2",
-  "description": "High-aggression architecture campaign ideas for the separate Codex autoresearch loop.",
-  "tries_per_idea_default": 6,
+  "schema_version": "pgolf.aggressive_ideas.v3",
+  "description": "Prioritized aggressive ideas for a 5090 discovery loop. Start from a stable near-frontier seed, isolate one primary novelty at a time, and only spend repeated attempts on families with evidence.",
+  "tries_per_idea_default": 3,
   "attempt_mode_default": "blueprint_locked_freeform_redesign",
-  "variant_rule_default": "Each attempt must implement the next blueprint as a materially different architecture redesign, not a local refinement ladder.",
+  "variant_rule_default": "Each attempt should test one primary novelty on top of a stable carrier anchor. Do not bundle topology, quantization, schedule, and module-family changes into one 5-minute proxy unless the blueprint explicitly requires it.",
   "ranking_policy": {
     "artifact_bytes_hard_max": 16000000,
     "training_seconds_min_ratio": 0.7,
@@ -13,863 +13,384 @@
     "catastrophic_bpb_gap": 0.05,
     "min_attempts_before_early_stop": 2,
     "max_invalid_attempts_before_early_stop": 2,
-    "max_catastrophic_attempts_before_early_stop": 2,
-    "max_noncontender_attempts_before_early_stop": 4
+    "max_catastrophic_attempts_before_early_stop": 1,
+    "max_noncontender_attempts_before_early_stop": 3,
+    "max_weak_valid_attempts_before_early_stop": 2
   },
   "campaign_default_regime": {
-    "artifact_target_bytes_min": 15200000,
-    "artifact_target_bytes_max": 15900000,
+    "artifact_target_bytes_min": 15000000,
+    "artifact_target_bytes_max": 15950000,
     "target_layers": "11-12",
     "d_model": 512,
-    "mlp_mult": "~3x",
-    "seq_len": 2048,
-    "batch_tokens": 524288
+    "mlp_mult": "2.5x-3x selective",
+    "seq_len": "768 stable seed; only push to 1024-1536 when throughput holds",
+    "batch_tokens": "131072 stable seed; change only with explicit reason"
   },
   "ideas": [
     {
-      "id": "xsa_neural_cache",
-      "title": "XSA + Neural Cache",
-      "branch_family": "xsa_or_cache",
-      "kind": "module_writing",
+      "id": "activation_rope_residual_seed",
+      "title": "Stable Frontier Seed + One Local Novelty",
+      "branch_family": "carrier_repartition",
+      "kind": "existing_surface",
       "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Implement real XSA or top-layer cross-window KV cache branches that change the carrier and evaluation behavior enough to test the long-context hypothesis honestly.",
+      "priority": 100,
+      "attempts_allowed": 4,
+      "max_primary_novelty_axes": 1,
+      "goal": "Use the frontier seed carrier and test one train.py-local novelty at a time: activation family, partial RoPE, residual-scale initialization, or a clip-override support change.",
       "must_change_axes": [
-        "module_family",
-        "tail_or_shared_partition",
-        "seq_len_bucket"
+        "local_train_py_knob"
       ],
       "forbidden_refinements": [
-        "carrier-only preparation without real XSA or cache behavior",
-        "path cleanup or canonicalization without a new cache or XSA variant",
-        "same carrier with only a late-tail precision reshuffle"
+        "changing carrier partition and quantization groups in the same run",
+        "dropping back to the compact recurrent baseline",
+        "adding a new module family on the same run as the local knob"
       ],
       "hints": [
-        "Prefer 11-12 layer 512-dim carriers instead of polishing the current depth-3 branch.",
-        "Top-layer cache is preferred before whole-model cache.",
-        "At least half of the attempts should introduce real XSA or cache logic in train.py."
+        "Keep the seed carrier stable and interpretable.",
+        "Use one primary novelty and at most one obvious support change.",
+        "These are high-EV discovery runs because they preserve throughput while probing transferable ideas."
       ],
       "attempt_blueprints": [
         {
           "label": "A",
-          "title": "Top-Tail XSA Carrier",
-          "summary": "Replace the branch-tip carrier with an 11-layer 512-dim architecture that keeps a simple lower stack but turns the final 3-4 layers into real XSA blocks with partial RoPE, seq_len 2048, and no TTT.",
+          "title": "Leaky-ReLU-Squared Seed",
+          "summary": "Keep the near-frontier seed carrier fixed and switch the MLP activation family to leaky-ReLU-squared, with no other material topology change.",
           "must_change_axes": [
-            "module_family",
-            "effective_depth",
-            "seq_len_bucket"
+            "local_train_py_knob"
           ]
         },
         {
           "label": "B",
-          "title": "Top-Layer Prefix Cache",
-          "summary": "Build a 12-layer 512-dim XSA tail variant that adds a top-layer cross-window prefix KV cache or summary cache for only the last 2-3 layers while keeping causal scoring intact.",
+          "title": "Partial-RoPE Seed",
+          "summary": "Keep the same carrier and test a partial-RoPE fraction below 1.0, without also changing the quantization story.",
           "must_change_axes": [
-            "module_family",
-            "tail_or_shared_partition",
-            "eval_behavior"
+            "local_train_py_knob"
           ]
         },
         {
           "label": "C",
-          "title": "Low-Rank-Q XSA Hybrid",
-          "summary": "Use low-rank Q to fund a 12-layer carrier with top-3 XSA layers plus a lighter cache path, explicitly spending the Q savings on extra depth rather than same-carrier polish.",
+          "title": "Residual-Scale Initialization Seed",
+          "summary": "Keep the same carrier and test a non-default residual-scale initialization while leaving activation and quantization otherwise familiar.",
           "must_change_axes": [
-            "q_rank_topology",
-            "effective_depth",
-            "module_family"
+            "local_train_py_knob"
           ]
         },
         {
           "label": "D",
-          "title": "Shared Trunk Plus Unique XSA Tail",
-          "summary": "Switch to a shared-trunk-plus-unique-tail layout where the upper 4 unique tail layers are XSA-only and the lower shared stack stays conventional, still targeting seq_len 2048.",
+          "title": "Best Local Knob + Clip Support",
+          "summary": "Take the strongest still-plausible local knob from the previous seed attempts and pair it with one coarse clip-percentile support change, still without a new module family.",
           "must_change_axes": [
-            "tail_or_shared_partition",
-            "module_family",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "1536-to-2048 XSA Curriculum",
-          "summary": "Run an 11-layer XSA-tail branch with a 1536 to 2048 curriculum and lower batch tokens so the XSA story tests longer-context growth rather than just module insertion.",
-          "must_change_axes": [
-            "seq_len_bucket",
-            "batch_or_grad_accum_regime",
-            "module_family"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "Cache-Heavy Upper Tail",
-          "summary": "Try the most aggressive still-plausible cache branch: 11-12 layers, 512-dim, top-layer cache plus XSA in the final tail, accepting that the run may fail or score poorly if the mechanism is wrong.",
-          "must_change_axes": [
-            "module_family",
-            "eval_behavior",
-            "tail_or_shared_partition"
+            "local_train_py_knob",
+            "coarse_quant_support"
           ]
         }
       ]
     },
     {
       "id": "late_selective_quantization",
-      "title": "Late Selective Compression-Aware Quantization",
+      "title": "Late Selective Quantization on a Stable Carrier",
       "branch_family": "selective_precision_or_quantization",
       "kind": "existing_surface",
       "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Explore coarse-group late-QAT and PTQ-style redesigns on stronger 11-12 layer carriers rather than slicing tiny float sets on the existing branch tip.",
+      "priority": 95,
+      "attempts_allowed": 4,
+      "max_primary_novelty_axes": 1,
+      "goal": "Test PTQ and late coarse-group QAT on a stable near-frontier carrier instead of using many precision micro-carve-outs or blanket INT4 experiments.",
       "must_change_axes": [
-        "coarse_quant_group",
-        "schedule_shape",
-        "carrier_shape"
+        "checkpoint_or_qat_strategy"
       ],
       "forbidden_refinements": [
-        "repeated slicing of the same late-tail float set",
-        "single-tensor precision toggles on an unchanged carrier",
-        "same-carrier fake-quant step nudges without a coarse-group redesign"
+        "single-tensor float exemptions on an otherwise unchanged branch",
+        "INT4-only MLP sweeps as the main story",
+        "changing the carrier and local module family in the same attempt"
       ],
       "hints": [
-        "Think in groups like head and embeddings, early attention, late attention, middle MLPs, and final MLPs.",
-        "Use later QAT or PTQ selection, not blanket early QAT.",
-        "Expect wider score spread than the ordinary loop."
+        "Think in groups: embeddings/head, middle MLPs, late attention, final MLPs.",
+        "If a run gets close but is invalid, the next attempt should be a budget repair, not a new story.",
+        "Post-quant checkpoint choice is part of the hypothesis, not an afterthought."
       ],
       "attempt_blueprints": [
         {
           "label": "A",
-          "title": "No-QAT PTQ Baseline Carrier",
-          "summary": "Build an 11-layer 512-dim near-cap carrier with no train-time QAT at all, denser warmdown checkpoints, and a post-quant selection path so the attempt actually tests the PTQ side of the hypothesis.",
+          "title": "PTQ Anchor",
+          "summary": "Use the stable carrier with no train-time QAT and denser warmdown checkpoints so the attempt honestly tests PTQ plus checkpoint choice.",
           "must_change_axes": [
-            "checkpoint_or_qat_strategy",
-            "effective_depth",
+            "checkpoint_or_qat_strategy"
+          ]
+        },
+        {
+          "label": "B",
+          "title": "Middle-MLP Late QAT",
+          "summary": "Keep the carrier fixed and turn on late QAT only for middle MLP groups, while keeping embeddings, head, and final MLPs safer.",
+          "must_change_axes": [
+            "coarse_quant_group"
+          ]
+        },
+        {
+          "label": "C",
+          "title": "Late-Attention + Middle-MLP QAT",
+          "summary": "Keep the same carrier and test one broader but still coarse late-QAT grouping: late attention plus middle MLPs only.",
+          "must_change_axes": [
+            "coarse_quant_group"
+          ]
+        },
+        {
+          "label": "D",
+          "title": "Post-Quant Selector",
+          "summary": "Keep the carrier stable and make the main novelty the post-quant selection rule: checkpoint choice, tiny soup, or clip-override ranking.",
+          "must_change_axes": [
+            "selection_rule"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "checkpoint_soup_or_ptq",
+      "title": "Checkpoint Choice and Post-Quant Soup",
+      "branch_family": "checkpoint_soup_or_ptq",
+      "kind": "existing_surface",
+      "attempt_mode": "blueprint_locked_freeform_redesign",
+      "priority": 90,
+      "attempts_allowed": 3,
+      "max_primary_novelty_axes": 1,
+      "goal": "Treat checkpoint choice as a first-class search variable and use post-quant quality, not float loss alone, as the ranking signal.",
+      "must_change_axes": [
+        "selection_rule"
+      ],
+      "forbidden_refinements": [
+        "changing carrier topology at the same time",
+        "quant-group sweeps plus checkpoint-soup changes in one run",
+        "new module-family additions"
+      ],
+      "hints": [
+        "This is a strong follow-on to a stable carrier because it preserves attribution.",
+        "A small soup or a different warmdown cadence is enough for one run."
+      ],
+      "attempt_blueprints": [
+        {
+          "label": "A",
+          "title": "Dense Warmdown Selection",
+          "summary": "Keep the stable carrier and use denser warmdown checkpoint saves so the run can rank checkpoints by post-quant quality.",
+          "must_change_axes": [
             "selection_rule"
           ]
         },
         {
           "label": "B",
-          "title": "Boundary-Safe Late-QAT",
-          "summary": "Use a 12-layer 512-dim carrier where only middle MLPs and late attention enter QAT late in training, while embeddings, head, and final MLPs stay safer.",
+          "title": "Tiny Post-Quant Soup",
+          "summary": "Keep the stable carrier and test a tiny soup of adjacent late checkpoints instead of relying on a single float winner.",
           "must_change_axes": [
-            "coarse_quant_group",
-            "schedule_shape",
-            "effective_depth"
+            "selection_rule"
           ]
         },
         {
           "label": "C",
-          "title": "Head-Emb Safe With Late Attention QAT",
-          "summary": "Try an 11-layer carrier that keeps embeddings and output head in higher precision, turns on QAT only for late attention plus middle MLPs near the final few percent of training, and rebalances depth accordingly.",
+          "title": "Clip-Aware Selector",
+          "summary": "Keep the stable carrier and make the main novelty a post-quant selector that sweeps a small number of coarse clip settings before final ranking.",
           "must_change_axes": [
-            "coarse_quant_group",
-            "schedule_shape",
-            "tail_or_shared_partition"
-          ]
-        },
-        {
-          "label": "D",
-          "title": "PTQ-Soup Quant Branch",
-          "summary": "Run a no-QAT or minimal-QAT branch that saves several warmdown checkpoints and chooses the best post-quant result or a tiny soup after quantization, even if float loss is not the best.",
-          "must_change_axes": [
-            "selection_rule",
-            "checkpoint_or_qat_strategy",
-            "coarse_quant_group"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "Late-QAT With 12-Layer Carrier",
-          "summary": "Spend the quantization budget on a full 12-layer 512-dim carrier with late-only coarse QAT groups, using the stronger carrier as the main change instead of another precision micro-carve-out.",
-          "must_change_axes": [
-            "effective_depth",
-            "coarse_quant_group",
-            "schedule_shape"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "High-Risk Coarse Group Sweep",
-          "summary": "Try the largest still-plausible coarse-group redesign: boundary-safe precision, middle MLP int6 or int5 late QAT, and a different carrier partition, accepting that this may score much worse if the sensitivity map is wrong.",
-          "must_change_axes": [
-            "coarse_quant_group",
-            "schedule_shape",
-            "tail_or_shared_partition"
+            "selection_rule"
           ]
         }
       ]
     },
     {
       "id": "low_rank_q_reallocation",
-      "title": "Low-Rank Q Structural Reallocation",
+      "title": "Low-Rank Q Reallocation",
       "branch_family": "low_rank_q_reallocation",
       "kind": "existing_surface",
       "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Use low-rank Q to fund obvious macro reallocations like extra depth, stronger local modules, or more steps instead of tiny same-carrier reallocations.",
+      "priority": 85,
+      "attempts_allowed": 4,
+      "max_primary_novelty_axes": 1,
+      "goal": "Use low-rank Q to buy one obvious macro spend at a time: one more unique layer, one cleaner width increase, or one cautious context increase.",
       "must_change_axes": [
-        "q_rank_topology",
-        "depth_or_partition_or_batch",
-        "carrier_shape"
+        "q_rank_topology"
       ],
       "forbidden_refinements": [
-        "same-carrier tail-width nudges funded by small Q cuts",
-        "adding another copy of the same local module on the same outer carrier",
-        "low-rank Q without a meaningful spend of the savings"
+        "low-rank Q without a visible spend of the savings",
+        "spending the savings on multiple unrelated changes at once",
+        "using low-rank Q only to make an already weak local-module branch more complicated"
       ],
       "hints": [
-        "Rank 128 or 192 style reallocations should buy something obvious.",
-        "Prefer 11-12 layer 512-dim carriers or a different module family.",
-        "Poor scores are acceptable if the redesign is real."
+        "Recent evidence suggests low-rank-Q can look good but often breaks the byte cap; prefer one budget repair or one single spend per run.",
+        "Use the stable carrier as the anchor whenever possible."
       ],
       "attempt_blueprints": [
         {
           "label": "A",
-          "title": "Low-Rank-Q Extra Depth",
-          "summary": "Use low-rank Q to build a 12-layer 512-dim carrier with more unique depth than the accepted branch, explicitly spending the savings on an extra layer rather than another tail polish.",
+          "title": "One Extra Unique Layer",
+          "summary": "Apply low-rank Q and spend the savings on exactly one additional unique tail layer, keeping the rest of the carrier close to the stable seed.",
           "must_change_axes": [
             "q_rank_topology",
-            "effective_depth",
-            "tail_or_shared_partition"
+            "effective_depth"
           ]
         },
         {
           "label": "B",
-          "title": "Low-Rank-Q Plus Smarter Local Module",
-          "summary": "Use low-rank Q to fund a different local-token module family on an 11-layer carrier, replacing the current neighbor-mixer family instead of duplicating it.",
+          "title": "Width Spend",
+          "summary": "Apply low-rank Q and spend the savings on one cleaner MLP-width increase on the stable carrier, without adding a new module family.",
           "must_change_axes": [
             "q_rank_topology",
+            "mlp_width_allocation"
+          ]
+        },
+        {
+          "label": "C",
+          "title": "1024 Context Spend",
+          "summary": "Apply low-rank Q and spend the savings on a cautious move to seq_len 1024, keeping the rest of the carrier simple enough that the context hypothesis is interpretable.",
+          "must_change_axes": [
+            "q_rank_topology",
+            "seq_len_bucket"
+          ]
+        },
+        {
+          "label": "D",
+          "title": "Budget Repair",
+          "summary": "If a previous low-rank-Q branch looked good but was invalid, use this attempt for a strict budget repair rather than another new mechanism.",
+          "must_change_axes": [
+            "budget_repair"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "canon_or_neighbor_mixer",
+      "title": "Localized Canon-Style Inserts",
+      "branch_family": "canon_or_neighbor_mixer",
+      "kind": "module_writing",
+      "attempt_mode": "blueprint_locked_freeform_redesign",
+      "priority": 70,
+      "attempts_allowed": 3,
+      "max_primary_novelty_axes": 1,
+      "goal": "Test a single localized Canon-style insert on an otherwise stable carrier, because this family showed the best recent creativity-to-score ratio among the module-writing ideas.",
+      "must_change_axes": [
+        "module_family"
+      ],
+      "forbidden_refinements": [
+        "multiple local-module families in one run",
+        "Canon insert plus a large carrier repartition",
+        "Canon insert plus a new quantization story on the same run"
+      ],
+      "hints": [
+        "Keep placement changes isolated.",
+        "One insert location per run is enough.",
+        "If the branch is alive but invalid, the next attempt should be a repair or placement simplification."
+      ],
+      "attempt_blueprints": [
+        {
+          "label": "A",
+          "title": "Bottom Insert",
+          "summary": "Add one small Canon-style insert low in the stack while keeping the carrier and quantization story otherwise stable.",
+          "must_change_axes": [
+            "module_family"
+          ]
+        },
+        {
+          "label": "B",
+          "title": "Pre-Final Insert",
+          "summary": "Move the same Canon-style idea to a pre-final placement, without also changing carrier depth or QAT grouping.",
+          "must_change_axes": [
             "module_family",
             "placement_or_byte_trade"
           ]
         },
         {
           "label": "C",
-          "title": "Low-Rank-Q More-Steps Branch",
-          "summary": "Convert Q savings into a lower batch or higher grad-accum regime on a near-cap 11-12 layer carrier so the attempt really tests more updates rather than same-carrier width.",
+          "title": "Placement Repair",
+          "summary": "Use the strongest still-plausible Canon attempt but simplify placement or width so the run is cleaner and easier to keep under budget.",
           "must_change_axes": [
-            "q_rank_topology",
-            "batch_or_grad_accum_regime",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "D",
-          "title": "Low-Rank-Q XSA Spend",
-          "summary": "Spend low-rank Q savings on introducing top-tail XSA or a similarly new upper-tail mechanism, not on the existing local mixer family.",
-          "must_change_axes": [
-            "q_rank_topology",
-            "module_family",
-            "tail_or_shared_partition"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "Asymmetric Q-Rank Carrier",
-          "summary": "Try an asymmetric low-rank-Q topology where lower or shared layers stay compressed but the upper tail keeps fuller Q, using the saved bytes for a different 11-12 layer partition.",
-          "must_change_axes": [
-            "q_rank_topology",
-            "tail_or_shared_partition",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "Largest Plausible Q Reallocation",
-          "summary": "Take the largest still-plausible low-rank-Q swing: new rank topology, new carrier partition, and a different spend target such as depth or module family, even if it risks a much worse score.",
-          "must_change_axes": [
-            "q_rank_topology",
-            "effective_depth",
-            "module_family"
+            "placement_or_byte_trade"
           ]
         }
       ]
     },
     {
-      "id": "split_local_context_families",
-      "title": "Split Local-Context Families",
-      "branch_family": "smeargate_or_ttt",
+      "id": "xsa_neural_cache",
+      "title": "XSA or Top-Layer Cache",
+      "branch_family": "xsa_or_cache",
       "kind": "module_writing",
       "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Treat XSA-family and SmearGate or TTT-family designs as separate branch families and establish them cleanly instead of blurring them into one hybrid line.",
+      "priority": 45,
+      "attempts_allowed": 3,
+      "max_primary_novelty_axes": 1,
+      "goal": "Try one clean XSA or cache mechanism at a time, late in the campaign, after the higher-EV stable-carrier and post-quant stories have been tested.",
       "must_change_axes": [
-        "module_family",
-        "separate_branch_identity",
-        "carrier_shape"
+        "module_family"
       ],
       "forbidden_refinements": [
-        "hybrids that blur XSA and TTT without evidence",
-        "cleanup-only commits inside an existing family",
-        "smear or TTT attempts that only polish the current neighbor path"
+        "combining XSA and cache and TTT in one run",
+        "using XSA as a carrier-only excuse without a real mechanism",
+        "raising context aggressively and changing quantization at the same time"
       ],
       "hints": [
-        "Three attempts should be clear XSA-family branches; three should be clear SmearGate or TTT-family branches.",
-        "Do not stack both families in a single early attempt.",
-        "Use the carrier to clarify the family identity."
+        "Use only the final 2-3 layers if you add a real mechanism.",
+        "Keep the rest of the carrier stable and explainable."
       ],
       "attempt_blueprints": [
         {
           "label": "A",
-          "title": "Pure XSA Family Carrier",
-          "summary": "Build a clean XSA-family branch with 11-12 layers, top-tail XSA, EMA or partial RoPE style shaping, and explicitly no TTT or SmearGate.",
+          "title": "Top-Tail XSA",
+          "summary": "Add real XSA logic only to the final 2-3 layers of a stable carrier, with no extra cache or TTT stack.",
           "must_change_axes": [
-            "module_family",
-            "effective_depth",
-            "separate_branch_identity"
+            "module_family"
           ]
         },
         {
           "label": "B",
-          "title": "Pure SmearGate Family Carrier",
-          "summary": "Build a separate SmearGate-family branch with a stronger local module and mixed low-bit plan, explicitly with no XSA in the upper tail.",
+          "title": "Lightweight Prefix Cache",
+          "summary": "Use a lightweight top-layer prefix cache or summary cache only in the upper tail, still keeping the rest of the carrier stable.",
           "must_change_axes": [
-            "module_family",
-            "coarse_quant_group",
-            "separate_branch_identity"
+            "module_family"
           ]
         },
         {
           "label": "C",
-          "title": "XSA Family With Late QAT",
-          "summary": "Try a clearer XSA-family carrier that adds late selective QAT and context 2048, still without any TTT or SmearGate mechanics.",
+          "title": "Context-Limited Mechanism Test",
+          "summary": "Test the strongest still-plausible XSA or cache idea but keep context limited to a cautious increase so the run stays interpretable and not obviously undertrained.",
           "must_change_axes": [
             "module_family",
-            "schedule_shape",
             "seq_len_bucket"
           ]
-        },
-        {
-          "label": "D",
-          "title": "Smear Plus Meta-TTT Family",
-          "summary": "Try a SmearGate branch paired with a lightweight meta-TTT or causal-TTT style mechanism and no XSA, even if this requires writing a new module surface.",
-          "must_change_axes": [
-            "module_family",
-            "separate_branch_identity",
-            "eval_behavior"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "XSA Family With Low-Rank-Q Spend",
-          "summary": "Use low-rank Q or another obvious structural spend to create a stronger XSA-family branch that stays cleanly separate from the TTT family.",
-          "must_change_axes": [
-            "module_family",
-            "q_rank_topology",
-            "separate_branch_identity"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "Smear Family With Better Local Module",
-          "summary": "Take the strongest still-plausible SmearGate-family redesign: new local-token module, mixed low-bit branch, maybe lightweight TTT, but still no XSA.",
-          "must_change_axes": [
-            "module_family",
-            "placement_or_byte_trade",
-            "separate_branch_identity"
-          ]
         }
       ]
     },
     {
-      "id": "compute_aware_context_curriculum",
-      "title": "Compute-Aware Context Curriculum",
-      "branch_family": "batch_or_context_curriculum",
-      "kind": "existing_surface",
-      "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Use real shorter-to-longer context curricula paired with carrier or batch changes rather than small context nudges on the current depth-3 branch.",
-      "must_change_axes": [
-        "seq_len_bucket_or_curriculum",
-        "batch_or_carrier_regime",
-        "carrier_shape"
-      ],
-      "forbidden_refinements": [
-        "warmup-only tweaks on the same curriculum shape",
-        "same-carrier context nudges without a compute trade",
-        "curricula that never meaningfully change the carrier"
-      ],
-      "hints": [
-        "Think 1024 or 1536 to 2048, not just 640 to 768.",
-        "Spend compute changes on more updates or a stronger carrier.",
-        "Expect some obvious losers."
-      ],
-      "attempt_blueprints": [
-        {
-          "label": "A",
-          "title": "1024-to-2048 11-Layer Curriculum",
-          "summary": "Switch to an 11-layer 512-dim carrier with a real 1024 to 2048 curriculum and lower batch tokens so the experiment actually reclaims steps early.",
-          "must_change_axes": [
-            "seq_len_bucket_or_curriculum",
-            "batch_or_grad_accum_regime",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "B",
-          "title": "1536-to-2048 Late Curriculum",
-          "summary": "Try a 12-layer carrier that trains at 1536 for most of the run and only pays for 2048 late, explicitly using the saved compute for a stronger upper tail.",
-          "must_change_axes": [
-            "seq_len_bucket_or_curriculum",
-            "effective_depth",
-            "tail_or_shared_partition"
-          ]
-        },
-        {
-          "label": "C",
-          "title": "1024-1536-2048 Staged Carrier",
-          "summary": "Run a three-stage context curriculum on an 11-layer carrier with a batch schedule that materially changes update count, not just another context toggle.",
-          "must_change_axes": [
-            "seq_len_bucket_or_curriculum",
-            "batch_or_grad_accum_regime",
-            "schedule_shape"
-          ]
-        },
-        {
-          "label": "D",
-          "title": "Low-Rank-Q Curriculum Spend",
-          "summary": "Use low-rank Q or a smaller local module to pay for a stronger 1024 or 1536 to 2048 curriculum on a 12-layer carrier.",
-          "must_change_axes": [
-            "q_rank_topology",
-            "seq_len_bucket_or_curriculum",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "XSA-Aware Curriculum",
-          "summary": "Combine a real longer-context curriculum with an XSA-tail carrier so the context branch tests whether the mechanism benefits from late long-context exposure.",
-          "must_change_axes": [
-            "module_family",
-            "seq_len_bucket_or_curriculum",
-            "tail_or_shared_partition"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "Largest Plausible Curriculum Swing",
-          "summary": "Take the biggest still-plausible curriculum redesign with real batch and carrier changes, accepting a poor score if the longer-context compute trade is wrong.",
-          "must_change_axes": [
-            "seq_len_bucket_or_curriculum",
-            "batch_or_grad_accum_regime",
-            "effective_depth"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "smarter_local_token_module",
-      "title": "Smarter Local-Token Module",
+      "id": "local_token_module",
+      "title": "Small Local-Token Module",
       "branch_family": "local_token_module",
       "kind": "module_writing",
       "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Replace crude BigramHash-style local signal with new compact local-token modules rather than polishing the current neighbor path.",
+      "priority": 35,
+      "attempts_allowed": 2,
+      "max_primary_novelty_axes": 1,
+      "goal": "Reserve one or two late low-priority attempts for truly small local-token modules that do not explode the proxy with many simultaneous changes.",
       "must_change_axes": [
-        "module_family",
-        "placement_or_byte_trade",
-        "carrier_shape"
+        "module_family"
       ],
       "forbidden_refinements": [
-        "neighbor-mixer cleanup without a new module family",
-        "same-module width or precision polish",
-        "reusing the current local module with only placement tweaks"
+        "large local modules plus carrier repartition in one run",
+        "combining a new local module with an INT4 sweep",
+        "multiple local-token families in one attempt"
       ],
       "hints": [
-        "The module family should visibly change between attempts.",
-        "Top-N exact plus hashed tail, two-scale local features, and factorized projections are all fair game.",
-        "Use compact modules that plausibly fit the submission constraints."
+        "Recent evidence says heavyweight local modules are low EV in this proxy.",
+        "If you test one, keep it tiny and well-isolated."
       ],
       "attempt_blueprints": [
         {
           "label": "A",
-          "title": "Exact-Plus-Hash Bigram Module",
-          "summary": "Introduce a compact top-N exact bigram table plus hashed tail module on an 11-layer 512-dim carrier, replacing the current local path rather than refining it.",
+          "title": "Factorized Bigram",
+          "summary": "Add one very small factorized-bigram style local feature on an otherwise stable carrier.",
           "must_change_axes": [
-            "module_family",
-            "placement_or_byte_trade",
-            "effective_depth"
+            "module_family"
           ]
         },
         {
           "label": "B",
-          "title": "Two-Scale Adjacent Plus Skip Module",
-          "summary": "Write a two-scale local feature module that mixes adjacent bigrams and skip-bigrams on a stronger 11-12 layer carrier.",
+          "title": "Hashed Tail Local Feature",
+          "summary": "Try one simple hashed-tail local token feature as the main novelty, still without a large carrier or quantization rewrite.",
           "must_change_axes": [
-            "module_family",
-            "placement_or_byte_trade",
-            "tail_or_shared_partition"
-          ]
-        },
-        {
-          "label": "C",
-          "title": "Factorized Bigram Projection",
-          "summary": "Replace the current local token path with a factorized bigram projection module that aims for a better byte-quality tradeoff than a monolithic table.",
-          "must_change_axes": [
-            "module_family",
-            "placement_or_byte_trade",
-            "batch_or_grad_accum_regime"
-          ]
-        },
-        {
-          "label": "D",
-          "title": "Lower-Stack Local Module",
-          "summary": "Try a redesigned local-token module placed low in an 11-12 layer carrier instead of only near the final tail, so the attempt meaningfully changes the stack topology.",
-          "must_change_axes": [
-            "module_family",
-            "placement",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "Upper-Tail Local Module With XSA Tail",
-          "summary": "Pair a new local-token module family with an XSA-style upper tail on a 12-layer carrier so the attempt probes a genuinely different stack than the current branch.",
-          "must_change_axes": [
-            "module_family",
-            "tail_or_shared_partition",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "Strongest Byte-Quality Local Module",
-          "summary": "Take the largest still-plausible local-token redesign with a new module family and new placement, even if the run risks a visibly worse score.",
-          "must_change_axes": [
-            "module_family",
-            "placement_or_byte_trade",
-            "effective_depth"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "quant_optimized_checkpoint_soup",
-      "title": "Quantization-Optimized Checkpoint Soup",
-      "branch_family": "checkpoint_soup_or_ptq",
-      "kind": "existing_surface",
-      "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Test real post-quant checkpoint selection and soup logic on strong carriers instead of only nudging QAT schedules.",
-      "must_change_axes": [
-        "selection_rule",
-        "checkpoint_or_qat_strategy",
-        "carrier_shape"
-      ],
-      "forbidden_refinements": [
-        "tiny schedule polish on unchanged post-quant selection logic",
-        "checkpoint-saving changes without a real post-quant selection target"
-      ],
-      "hints": [
-        "At least some attempts should disable QAT and rely on post-quant ranking.",
-        "Dense warmdown checkpoint saves are expected here.",
-        "A weak float checkpoint can still be a good quantized checkpoint."
-      ],
-      "attempt_blueprints": [
-        {
-          "label": "A",
-          "title": "No-QAT Post-Quant Selection",
-          "summary": "Run an 11-layer 512-dim carrier with no QAT, denser warmdown checkpoint saves, and explicit post-quant checkpoint selection.",
-          "must_change_axes": [
-            "selection_rule",
-            "checkpoint_or_qat_strategy",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "B",
-          "title": "Top-2 Post-Quant Soup",
-          "summary": "Run a similar strong carrier but soup the top two checkpoints by post-quant validation instead of selecting a single best float checkpoint.",
-          "must_change_axes": [
-            "selection_rule",
-            "checkpoint_or_qat_strategy",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "C",
-          "title": "Selective SWA Plus PTQ",
-          "summary": "Test a carrier that uses selective late SWA over the final warmdown portion plus PTQ-style ranking of resulting checkpoints.",
-          "must_change_axes": [
-            "selection_rule",
-            "checkpoint_or_qat_strategy",
-            "schedule_shape"
-          ]
-        },
-        {
-          "label": "D",
-          "title": "12-Layer PTQ-Soup Carrier",
-          "summary": "Spend the same idea on a full 12-layer carrier with post-quant snapshot ranking so the attempt measures whether stronger carriers benefit more from soup selection.",
-          "must_change_axes": [
-            "effective_depth",
-            "selection_rule",
-            "checkpoint_or_qat_strategy"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "Low-Rank-Q PTQ Branch",
-          "summary": "Use low-rank Q or another structural spend to fit a stronger carrier, then select or soup checkpoints by post-quant quality rather than float loss.",
-          "must_change_axes": [
-            "q_rank_topology",
-            "selection_rule",
-            "checkpoint_or_qat_strategy"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "Most Aggressive Soup Trial",
-          "summary": "Take the largest still-plausible checkpoint-soup redesign with denser saves and post-quant ranking, accepting a poor score if the selection logic is wrong.",
-          "must_change_axes": [
-            "selection_rule",
-            "checkpoint_or_qat_strategy",
-            "effective_depth"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "localized_canon_inserts",
-      "title": "Localized Canon Inserts",
-      "branch_family": "canon_or_neighbor_mixer",
-      "kind": "module_writing",
-      "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Write localized Canon-style neighbor-mixing inserts and place them in meaningfully different carriers rather than reusing the current neighbor path.",
-      "must_change_axes": [
-        "module_family",
-        "placement",
-        "carrier_shape"
-      ],
-      "forbidden_refinements": [
-        "canonicalization or cleanup of an existing neighbor path",
-        "reusing the same placement without a materially new Canon mechanism",
-        "same carrier with only tiny local-module toggles"
-      ],
-      "hints": [
-        "These should be real Canon-style inserts, not renamed neighbor polish.",
-        "Lower-stack or pre-final-XSA placements are preferred.",
-        "Keep the mechanism localized and interpretable."
-      ],
-      "attempt_blueprints": [
-        {
-          "label": "A",
-          "title": "Bottom Canon Insert",
-          "summary": "Add a single localized Canon-style insert low in an 11-layer 512-dim carrier so the lower stack, not the tail, changes meaningfully.",
-          "must_change_axes": [
-            "module_family",
-            "placement",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "B",
-          "title": "Pre-Final-XSA Canon Insert",
-          "summary": "Pair a Canon insert right before a top-tail XSA block in a 12-layer carrier, keeping the Canon change local and interpretable.",
-          "must_change_axes": [
-            "module_family",
-            "placement",
-            "tail_or_shared_partition"
-          ]
-        },
-        {
-          "label": "C",
-          "title": "Dual Canon Inserts",
-          "summary": "Try two localized Canon inserts at distinct depths in a stronger carrier to test whether Canon behaves better as a sparse pattern than a single late add-on.",
-          "must_change_axes": [
-            "module_family",
-            "placement",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "D",
-          "title": "Canon Replacing Current Local Path",
-          "summary": "Remove or bypass the current neighbor-style local path and replace it with a Canon-style insert family on an 11-layer carrier.",
-          "must_change_axes": [
-            "module_family",
-            "placement_or_byte_trade",
-            "tail_or_shared_partition"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "Low-Rank-Q Canon Carrier",
-          "summary": "Use low-rank Q or a smaller attention budget to fit a cleaner Canon branch on a 12-layer carrier rather than bolting Canon onto the current winner.",
-          "must_change_axes": [
-            "q_rank_topology",
-            "module_family",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "Largest Plausible Canon Redesign",
-          "summary": "Take the biggest still-plausible localized Canon swing with a different carrier shape and placement, accepting that it may score much worse if Canon is a dead end here.",
-          "must_change_axes": [
-            "module_family",
-            "placement",
-            "effective_depth"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "selective_int4_mlp",
-      "title": "Selective INT4 MLP Moonshot",
-      "branch_family": "selective_precision_or_quantization",
-      "kind": "existing_surface",
-      "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Test genuinely different selective INT4 MLP carriers where INT4 frees capacity for depth or new modules instead of becoming another same-carrier precision slice.",
-      "must_change_axes": [
-        "int4_target_group",
-        "carrier_or_depth_spend",
-        "carrier_shape"
-      ],
-      "forbidden_refinements": [
-        "blanket same-carrier precision slicing without a new selective INT4 target pattern",
-        "INT4 attempts that do not spend the savings on a macro change"
-      ],
-      "hints": [
-        "Keep boundary and final MLPs at safer precision.",
-        "Middle-layer MLPs are the main targets.",
-        "These attempts can and should be volatile."
-      ],
-      "attempt_blueprints": [
-        {
-          "label": "A",
-          "title": "Middle-Two INT4 With Extra Depth",
-          "summary": "Quantize only the middle two or three MLPs to INT4 on an 11-layer carrier and spend the savings on extra unique depth or stronger upper-tail layers.",
-          "must_change_axes": [
-            "int4_target_group",
-            "carrier_or_depth_spend",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "B",
-          "title": "Middle-Band INT4 With 12 Layers",
-          "summary": "Use selective middle-band INT4 to fit a 12-layer 512-dim carrier while keeping boundary and final MLPs safer.",
-          "must_change_axes": [
-            "int4_target_group",
-            "effective_depth",
-            "carrier_or_depth_spend"
-          ]
-        },
-        {
-          "label": "C",
-          "title": "Lower-Middle INT4 Plus Better Local Module",
-          "summary": "Target lower-middle MLPs for INT4 and spend the saved bytes on a different local-token module family rather than the current local path.",
-          "must_change_axes": [
-            "int4_target_group",
-            "module_family",
-            "carrier_or_depth_spend"
-          ]
-        },
-        {
-          "label": "D",
-          "title": "INT4 Plus Low-Rank-Q Carrier",
-          "summary": "Combine selective middle-layer INT4 with low-rank Q to fund a meaningfully stronger carrier or more updates, not a same-carrier precision tweak.",
-          "must_change_axes": [
-            "int4_target_group",
-            "q_rank_topology",
-            "carrier_or_depth_spend"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "INT4 Middle Band With XSA Tail",
-          "summary": "Spend selective INT4 savings on an XSA-style upper tail so the attempt becomes a genuine architecture branch rather than a pure quantization test.",
-          "must_change_axes": [
-            "int4_target_group",
-            "module_family",
-            "tail_or_shared_partition"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "Highest-Risk INT4 Moonshot",
-          "summary": "Take the largest still-plausible selective INT4 redesign with clear macro spend of the savings, accepting that a bad `1.60+` score is useful telemetry if the moonshot fails.",
-          "must_change_axes": [
-            "int4_target_group",
-            "carrier_or_depth_spend",
-            "effective_depth"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "activation_rope_residual_variants",
-      "title": "Activation + Partial-RoPE + Residual-Scale Variants",
-      "branch_family": "carrier_repartition",
-      "kind": "existing_surface",
-      "attempt_mode": "blueprint_locked_freeform_redesign",
-      "goal": "Probe local train.py-only mechanisms that can shift quality/throughput tradeoffs without simply copying a public carrier: activation family, partial RoPE, and residual-scale initialization on near-cap carriers.",
-      "must_change_axes": [
-        "module_family",
-        "effective_depth",
-        "schedule_shape"
-      ],
-      "forbidden_refinements": [
-        "same carrier with only one scalar tweak and no real mechanism change",
-        "dropping back to the old compact depth-3 family",
-        "copying a public winning stack without another meaningful difference"
-      ],
-      "hints": [
-        "Keep these attempts on 10-12 layer near-cap carriers.",
-        "Use partial RoPE, leaky-ReLU-squared, or residual-scale init as local mechanisms, not as standalone micro-tunes.",
-        "Preserve at least one major difference from public frontier recipes."
-      ],
-      "attempt_blueprints": [
-        {
-          "label": "A",
-          "title": "Leaky-ReLU\u00b2 Carrier",
-          "summary": "Try an 11-layer 512-dim near-cap carrier that swaps the MLP activation family to leaky-ReLU-squared, keeps the rest simple, and tests whether the activation change supports a stronger carrier at the same proxy budget.",
-          "must_change_axes": [
-            "module_family",
-            "effective_depth",
-            "carrier_shape"
-          ]
-        },
-        {
-          "label": "B",
-          "title": "Partial-RoPE Long Context",
-          "summary": "Use an 11-12 layer carrier with partial RoPE and a 1536-to-2048 context curriculum so the run tests positional selectivity plus longer context, not just another carrier reshape.",
-          "must_change_axes": [
-            "module_family",
-            "seq_len_bucket",
-            "schedule_shape"
-          ]
-        },
-        {
-          "label": "C",
-          "title": "Residual-Scale Init Branch",
-          "summary": "Try a near-cap carrier with smaller residual-scale initialization plus one local activation or RoPE change so the test is still a real branch and not a scalar-only micro-tune.",
-          "must_change_axes": [
-            "module_family",
-            "schedule_shape",
-            "carrier_shape"
-          ]
-        },
-        {
-          "label": "D",
-          "title": "Leaky-ReLU\u00b2 Plus Low-Rank-Q Spend",
-          "summary": "Use low-rank Q to fund a deeper carrier that also changes the activation family, explicitly spending the saved capacity on depth or context instead of same-carrier polish.",
-          "must_change_axes": [
-            "q_rank_topology",
-            "module_family",
-            "effective_depth"
-          ]
-        },
-        {
-          "label": "E",
-          "title": "Partial-RoPE Boundary-Safe Quant Branch",
-          "summary": "Combine partial RoPE with a boundary-safe late-quant grouping on a near-cap carrier so the attempt measures whether a positional change shifts the best coarse quant grouping.",
-          "must_change_axes": [
-            "module_family",
-            "coarse_quant_group",
-            "schedule_shape"
-          ]
-        },
-        {
-          "label": "F",
-          "title": "High-Risk Local-Mechanism Sweep",
-          "summary": "Take the biggest still-plausible train.py-local sweep: partial RoPE, non-default activation family, and a different residual-scale initialization on a near-cap carrier, accepting that the run may score badly if the combination is wrong.",
-          "must_change_axes": [
-            "module_family",
-            "carrier_shape",
-            "schedule_shape"
+            "module_family"
           ]
         }
       ]

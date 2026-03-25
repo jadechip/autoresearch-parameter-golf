@@ -3,9 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from pathlib import Path
 from typing import Any
 
+from pathlib import Path
+import sys
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 from train import atomic_write_json, load_and_validate_results
 
 
@@ -21,7 +26,8 @@ DEFAULT_RANKING_POLICY = {
     "min_attempts_before_early_stop": 2,
     "max_invalid_attempts_before_early_stop": 2,
     "max_catastrophic_attempts_before_early_stop": 2,
-    "max_noncontender_attempts_before_early_stop": 4,
+    "max_noncontender_attempts_before_early_stop": 3,
+    "max_weak_valid_attempts_before_early_stop": 2,
 }
 
 
@@ -62,6 +68,7 @@ def normalize_ranking_policy(raw: Any) -> dict[str, Any]:
         "max_invalid_attempts_before_early_stop": int(payload["max_invalid_attempts_before_early_stop"]),
         "max_catastrophic_attempts_before_early_stop": int(payload["max_catastrophic_attempts_before_early_stop"]),
         "max_noncontender_attempts_before_early_stop": int(payload["max_noncontender_attempts_before_early_stop"]),
+        "max_weak_valid_attempts_before_early_stop": int(payload["max_weak_valid_attempts_before_early_stop"]),
     }
 
 
@@ -121,6 +128,9 @@ def hydrate_campaign_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         desired_hints = [str(item) for item in source_idea.get("hints", [])]
         desired_axes = [str(item) for item in source_idea.get("must_change_axes", [])]
         desired_forbidden = [str(item) for item in source_idea.get("forbidden_refinements", [])]
+        desired_attempts_allowed = int(source_idea.get("attempts_allowed", idea.get("attempts_allowed", 0) or 0))
+        desired_priority = int(source_idea.get("priority", idea.get("priority", 0) or 0))
+        desired_max_primary_novelty_axes = int(source_idea.get("max_primary_novelty_axes", idea.get("max_primary_novelty_axes", 1) or 1))
         desired_blueprints = [
             normalize_blueprint(item, index)
             for index, item in enumerate(source_idea.get("attempt_blueprints", []))
@@ -148,6 +158,19 @@ def hydrate_campaign_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             changed = True
         if idea.get("forbidden_refinements") != desired_forbidden:
             idea["forbidden_refinements"] = desired_forbidden
+            changed = True
+        if desired_attempts_allowed > 0 and idea.get("attempts_allowed") != desired_attempts_allowed:
+            if int(idea.get("attempts_used", 0)) > desired_attempts_allowed:
+                raise ValueError(
+                    f"idea {idea.get('id')} already used {idea.get('attempts_used')} attempts but metadata now asks for {desired_attempts_allowed}"
+                )
+            idea["attempts_allowed"] = desired_attempts_allowed
+            changed = True
+        if idea.get("priority") != desired_priority:
+            idea["priority"] = desired_priority
+            changed = True
+        if idea.get("max_primary_novelty_axes") != desired_max_primary_novelty_axes:
+            idea["max_primary_novelty_axes"] = desired_max_primary_novelty_axes
             changed = True
         if idea.get("attempt_blueprints") != desired_blueprints:
             idea["attempt_blueprints"] = desired_blueprints
@@ -191,6 +214,8 @@ def normalize_idea(raw: dict[str, Any], attempts_allowed: int) -> dict[str, Any]
         "kind": str(raw.get("kind", "existing_surface")),
         "attempt_mode": str(raw.get("attempt_mode", "independent_architecture_variants")),
         "goal": str(raw.get("goal", "")),
+        "priority": int(raw.get("priority", 0)),
+        "max_primary_novelty_axes": int(raw.get("max_primary_novelty_axes", 1)),
         "hints": [str(item) for item in raw.get("hints", [])],
         "must_change_axes": [str(item) for item in raw.get("must_change_axes", [])],
         "forbidden_refinements": [str(item) for item in raw.get("forbidden_refinements", [])],
@@ -602,6 +627,21 @@ def recompute_campaign_rollups(state_dir: Path, payload: dict[str, Any]) -> dict
     return payload
 
 
+def weak_valid_attempts(idea: dict[str, Any]) -> int:
+    return sum(1 for attempt in idea.get("attempts", []) if attempt.get("classification") in {"valid_but_weak", "noncontender"})
+
+
+def has_invalid_near_miss(idea: dict[str, Any], policy: dict[str, Any]) -> bool:
+    contender_gap = float(policy["contender_bpb_gap"])
+    for attempt in idea.get("attempts", []):
+        if attempt.get("classification") != "invalid_budget":
+            continue
+        gap = attempt.get("competitive_gap")
+        if gap is not None and float(gap) <= contender_gap:
+            return True
+    return False
+
+
 def maybe_mark_early_stop(
     campaign: dict[str, Any],
     idea: dict[str, Any],
@@ -618,7 +658,10 @@ def maybe_mark_early_stop(
     if idea.get("contender_attempts", 0) > 0:
         return
 
-    if idea.get("invalid_attempts", 0) >= int(policy["max_invalid_attempts_before_early_stop"]):
+    invalid_near_miss = has_invalid_near_miss(idea, policy)
+    weak_valid_count = weak_valid_attempts(idea)
+
+    if not invalid_near_miss and idea.get("invalid_attempts", 0) >= int(policy["max_invalid_attempts_before_early_stop"]):
         idea["early_stop_reason"] = "too_many_invalid_attempts"
         return
 
@@ -626,14 +669,27 @@ def maybe_mark_early_stop(
         idea["early_stop_reason"] = "too_many_catastrophic_attempts"
         return
 
+    if weak_valid_count >= int(policy["max_weak_valid_attempts_before_early_stop"]):
+        best_valid = idea.get("best_valid_val_bpb")
+        if best_valid is None or baseline_val_bpb is None:
+            idea["early_stop_reason"] = "repeated_weak_valid_attempts"
+            return
+        if float(best_valid) - float(baseline_val_bpb) >= float(policy["poor_bpb_gap"]):
+            idea["early_stop_reason"] = "repeated_weak_valid_attempts"
+            return
+
     if attempts_used >= int(policy["max_noncontender_attempts_before_early_stop"]):
         best_valid = idea.get("best_valid_val_bpb")
         if best_valid is None:
+            if invalid_near_miss:
+                return
             idea["early_stop_reason"] = "no_valid_contender_after_multiple_attempts"
             return
         if baseline_val_bpb is not None and (
             float(best_valid) - float(baseline_val_bpb) >= float(policy["poor_bpb_gap"])
         ):
+            if invalid_near_miss:
+                return
             idea["early_stop_reason"] = "best_valid_run_still_far_off_frontier"
 
 
@@ -703,17 +759,41 @@ def idea_runtime_view(campaign: dict[str, Any], idea: dict[str, Any], state_dir:
     session_summary = load_session_summary(state_dir)
     best_valid = idea.get("best_valid_val_bpb")
     baseline_val_bpb = session_summary.get("accepted_val_bpb")
+    ranking_policy = dict(campaign.get("ranking_policy", DEFAULT_RANKING_POLICY))
     contender_found = idea.get("contender_attempts", 0) > 0
+    invalid_near_miss = has_invalid_near_miss(idea, ranking_policy)
     payload["attempts_remaining"] = max(0, attempts_allowed - attempts_used)
     payload["next_attempt_number"] = None if next_index is None else attempts_used + 1
     payload["completed_blueprints"] = blueprints[:attempts_used]
     payload["remaining_blueprints"] = blueprints[attempts_used:]
     payload["next_attempt_blueprint"] = None if next_index is None else blueprints[next_index]
-    payload["ranking_policy"] = dict(campaign.get("ranking_policy", DEFAULT_RANKING_POLICY))
+    payload["ranking_policy"] = ranking_policy
     payload["campaign_default_regime"] = dict(campaign.get("campaign_default_regime", {}))
     payload["accepted_baseline"] = session_summary
     payload["frontier_gap_to_baseline"] = None if best_valid is None or baseline_val_bpb is None else float(best_valid) - float(baseline_val_bpb)
-    payload["recommended_phase"] = "refine" if contender_found else "establish"
+    payload["weak_valid_attempts"] = weak_valid_attempts(idea)
+    payload["invalid_near_miss_detected"] = invalid_near_miss
+    payload["recent_attempts"] = [
+        {
+            "run_id": item.get("run_id"),
+            "classification": item.get("classification"),
+            "val_bpb": item.get("val_bpb"),
+            "artifact_bytes": item.get("artifact_bytes"),
+            "competitive_gap": item.get("competitive_gap"),
+        }
+        for item in idea.get("attempts", [])[-3:]
+    ]
+    if contender_found:
+        payload["recommended_phase"] = "refine"
+    elif invalid_near_miss:
+        payload["recommended_phase"] = "repair"
+    else:
+        payload["recommended_phase"] = "establish"
+    payload["recommended_experiment_style"] = {
+        "anchor_config_required": True,
+        "primary_novelty_axes": int(idea.get("max_primary_novelty_axes", 1) or 1),
+        "prefer_single_support_change": True,
+    }
     return payload
 
 

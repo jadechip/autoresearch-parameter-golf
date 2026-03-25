@@ -8,7 +8,9 @@ PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 AUTORESEARCH_ROOT="${AUTORESEARCH_ROOT:-$ROOT_DIR/runs/autoresearch_5090}"
 RUNS_DIR="${RUNS_DIR:-$AUTORESEARCH_ROOT/runs}"
 INDEX_DIR="${INDEX_DIR:-$AUTORESEARCH_ROOT/index}"
-CONFIG_JSON="${CONFIG_JSON:-$ROOT_DIR/configs/autoresearch_5090_5min.json}"
+DEFAULT_CONFIG_JSON="$ROOT_DIR/configs/autoresearch_5090_5min.json"
+CONFIG_JSON="${CONFIG_JSON:-}"
+CONFIG_JSON_SOURCE="environment_or_default"
 RESULTS_TSV_PATH="${RESULTS_TSV_PATH:-$AUTORESEARCH_ROOT/results.tsv}"
 MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-300}"
 RUN_ID="${RUN_ID:-ar5090-$(date -u +%Y%m%d-%H%M%S)}"
@@ -50,6 +52,46 @@ else
   echo "No autoresearch session found at $SESSION_JSON" >&2
   echo "Run a baseline first (for example RUN_ID=baseline_5090_5min bash scripts/run_autoresearch_experiment.sh)," >&2
   echo "then initialize session state with: bash scripts/init_autoresearch_session.sh" >&2
+  exit 2
+fi
+
+resolve_config_json() {
+  if [[ -n "$CONFIG_JSON" ]]; then
+    CONFIG_JSON_SOURCE="environment"
+    return 0
+  fi
+  if [[ "$USE_SESSION_STATE" == "1" && -f "$SESSION_JSON" ]]; then
+    local policy_config_json
+    policy_config_json="$($PYTHON_BIN - <<'PY' "$SESSION_JSON" "$ROOT_DIR"
+import json, sys
+from pathlib import Path
+session = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+root = Path(sys.argv[2])
+value = (session.get('search_policy') or {}).get('config_json')
+if not value:
+    print('')
+else:
+    path = Path(str(value))
+    if not path.is_absolute():
+        path = root / path
+    print(path)
+PY
+)"
+    if [[ -n "$policy_config_json" ]]; then
+      CONFIG_JSON="$policy_config_json"
+      CONFIG_JSON_SOURCE="search_policy"
+      return 0
+    fi
+  fi
+  CONFIG_JSON="$DEFAULT_CONFIG_JSON"
+  CONFIG_JSON_SOURCE="default"
+}
+
+resolve_config_json
+
+if [[ ! -f "$CONFIG_JSON" ]]; then
+  echo "Missing config json: $CONFIG_JSON" >&2
+  echo "Resolved from: $CONFIG_JSON_SOURCE" >&2
   exit 2
 fi
 
@@ -175,6 +217,7 @@ PY
 echo "Starting autoresearch experiment"
 echo "RUN_ID=$RUN_ID"
 echo "CONFIG_JSON=$CONFIG_JSON"
+echo "CONFIG_JSON_SOURCE=$CONFIG_JSON_SOURCE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "INDEX_DIR=$INDEX_DIR"
 echo "MAX_WALLCLOCK_SECONDS=$MAX_WALLCLOCK_SECONDS"
@@ -185,6 +228,8 @@ cat > "$ACTIVE_JSON" <<EOF2
 {
   "status": "running",
   "run_id": "$RUN_ID",
+  "config_json": "$CONFIG_JSON",
+  "config_json_source": "$CONFIG_JSON_SOURCE",
   "output_dir": "$OUTPUT_DIR",
   "results_path": "$OUTPUT_DIR/results.json",
   "metrics_path": "$OUTPUT_DIR/metrics.jsonl",
@@ -242,4 +287,5 @@ if [[ "$USE_SESSION_STATE" == "1" ]]; then
   echo "Autoresearch session: $SESSION_JSON"
 fi
 echo "Latest index: $INDEX_DIR/latest.json"
-echo "Best index: $INDEX_DIR/best.json"
+echo "Best valid index: $INDEX_DIR/best.json"
+echo "Best raw index: $INDEX_DIR/best_raw.json"

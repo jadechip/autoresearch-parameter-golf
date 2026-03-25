@@ -2,275 +2,130 @@
 
 This repo uses a two-tier workflow:
 
-- `1x5090` autoresearch is a production-proxy search tier.
+- `1x5090` autoresearch is a short fixed-budget discovery tier.
 - `1xH100` and `8xH100` runs are promotion / submission-rehearsal tiers.
 
-Your job on the 5090 tier is not to win the final challenge directly. Your job is to find changes that are likely to transfer to the real Parameter Golf constraints:
+Your job on the 5090 tier is not to fully win the final challenge in one run. Your job is to run an honest, information-dense proxy that helps discover candidate branches worth refining or promoting.
 
-- train under 10 minutes on `8xH100 SXM`
-- eval under 10 minutes
-- artifact under `16,000,000` bytes
-- lowest possible `val_bpb`
+## Read First
 
 At the start of a session, inspect:
 
-- current git branch
-- if needed, create a dedicated autoresearch branch for the session
-- recent git history on that autoresearch branch
-- `.autoresearch/session.json`
-- `.autoresearch/notes.md`
+- current git branch and recent git history on that branch
+- `.autoresearch/session.json` or `.autoresearch_aggressive/session.json`
+- `.autoresearch/notes.md` or `.autoresearch_aggressive/notes.md`
 - `COMPETITIVE_PRIORS.md`
+- `runs/autoresearch_5090/index/latest.json`
 - `runs/autoresearch_5090/index/best.json`
+- `runs/autoresearch_5090/index/best_raw.json` if it exists
 
-Use git history as the experiment memory for what has already been tried and what has already won.
-Use `.venv/bin/python scripts/summarize_recent_autoresearch.py --limit 12` as a compact novelty check before choosing the next mutation.
-Treat `.autoresearch/session.json["search_policy"]` as the live lane policy: it may switch the loop into `frontier_pure_model` or `leaderboard_eval` mode, enable benchmark preflight, and change how discovery versus refinement should be balanced.
-New branches should set `config_transform_profile` explicitly. `manual` means no silent lineage rewrites, `safe_rebalance` allows only broad-shape cleanup, and `legacy_lineage` is for intentionally revisiting the old compact family.
+Use git history plus structured results as the experiment memory.
 
-Accepted-state policy:
+## Accepted-State Policy
 
 - Treat the current branch tip as the accepted code state.
 - Treat recent git history as the canonical memory of accepted and rejected experiments.
-- Treat `runs/autoresearch_5090/index/best.json` as numeric telemetry only. It may reflect a reverted run.
-- Do not let `best.json` override the accepted branch state on its own.
+- Treat `best.json` and `best_valid.json` as ranking-valid-only pointers.
+- Treat `best_raw.json` as numeric telemetry only; it may point at a reverted or invalid run.
+- Do not let any index file override the accepted branch state on its own.
 - Treat `.autoresearch/session.json` as the readiness gate. If it is missing or not `ready`, do not start the loop.
 
 ## What You May Edit
 
-- Edit `train.py`.
-- You may also update `.autoresearch/notes.md` as local session memory for hypotheses and outcomes.
-- You may change hyperparameters, defaults, schedules, adapter placement, quantization behavior, and model/training details inside `train.py`.
-- Architecture changes inside the current baseline family are allowed and expected.
-- Self-contained module additions inside `train.py` are also allowed when they preserve autoregressive causality, export/reload, artifact accounting, and structured results.
-- Keep the decoder-only submission regime recognizable unless a replacement is clearly better and backed by measured results.
+- `train.py`
+- `.autoresearch/notes.md` or `.autoresearch_aggressive/notes.md`
+- a minimal helper script only when a hypothesis cannot be tested honestly without preserving structured outputs and export/reload invariants
+- lane policy or idea files when the search process itself is clearly wasting runs
 
 ## What You Must Not Rely On
 
-- Do not scrape raw stdout as the control surface.
-- Do not depend on `run.log` tailing for success/failure detection.
-- Do not assume crashes will only be visible in terminal output.
-
-Use structured files instead:
+Do not treat terminal output as the control surface. Use structured files:
 
 - `output_dir/results.json`
 - `output_dir/crash.json`
 - `results.tsv`
 - `output_dir/submission_bundle/manifest.json`
-- `runs/autoresearch_5090/index/latest.json`
-- `runs/autoresearch_5090/index/best.json`
+- `runs/.../index/latest.json`
+- `runs/.../index/best.json`
+- `runs/.../index/best_raw.json`
 - `.autoresearch/session.json`
 - `.autoresearch/experiments.jsonl`
-- `.autoresearch/notes.md`
-
-## Files That Should Usually Stay Fixed
-
-- `prepare.py`
-- `validate_results.py`
-- `summarize_artifact.py`
-- `scripts/autoresearch_state.py`
-- `scripts/init_autoresearch_session.sh`
-- `scripts/run_codex_autoresearch_loop.sh`
-- `scripts/run_autoresearch_experiment.sh`
-- `scripts/index_autoresearch_run.py`
-- `program.md`
-- `README.md`
-- `AUTORESEARCH_SETUP.md`
-- `PRODUCTION_READINESS.md`
-- tests, unless a requested code change requires matching test updates
+- `.autoresearch_aggressive/aggressive_campaign.json`
 
 ## Non-Negotiable Invariants
 
-- Preserve tokenizer-agnostic bits-per-byte correctness.
-- Keep `results.json` schema valid.
-- Keep export -> reload -> eval working.
-- Keep checkpoint save/resume working.
-- Crash fast on invalid configs.
-- Keep `train.py` as the main mutation target.
+- preserve tokenizer-agnostic bits-per-byte correctness
+- keep `results.json` schema valid
+- keep export -> reload -> eval working for full runs
+- keep checkpoint save/resume working
+- crash fast on invalid configs
+- keep `train.py` as the main mutation target
+- preserve causal scoring and honest artifact accounting
+- keep `artifact_bytes < 16,000,000`
 
-Keep the competition invariants intact:
+## First-Principles 5090 Search Strategy
 
-- decoder-only LM
-- tied embeddings
-- GQA
-- RoPE or a compatible partial-RoPE variant
-- RMSNorm
-- ReLU^2-family MLPs or other local activation variants that remain submission-safe
-- recurrence or shallow shared-core variants remain allowed, but they are no longer the default frontier assumption
-- per-loop adapters when useful
-- QAT-aware training or PTQ-style post-quant selection
-- row-wise INT8 export + zlib packing, with packed coarse mixed low-bit groups and per-pattern clip overrides when they still export cleanly
+Treat the 5090 as a noisy but useful ranking proxy.
 
-You may reallocate capacity within this family and add self-contained local modules that still fit the same submission and export discipline. Do not wander into unrelated training stacks or infra rewrites.
+The proxy is strongest when:
 
-Current recovered search baseline:
+- the carrier anchor is stable enough that run-to-run comparisons mean something
+- one primary novelty is tested at a time
+- preflight kills obvious byte/throughput losers before full runs
+- invalid near-misses trigger budget repair, not another totally new story
+- dead families are demoted quickly instead of consuming all remaining attempts
 
-- the last trusted compact 5090 winner was a `seq_len=768`, `1 shared x 1 loop`, `tail=3`, `8x` unique-tail MLP line at about `7.26 MB`
-- that materially under-spends the hard `16 MB` cap
-- do not assume the best next move is to keep shrinking the model
-- do not assume more recurrence is the right frontier direction either
+In practice, this means:
 
-## Production-Proxy Objective
+- start from the lane policy’s `config_json` when one is provided
+- prefer a stable near-frontier seed carrier for the `frontier_pure_model` lane
+- allow at most one primary novelty plus one small support change per 5-minute proxy
+- do not combine topology + quantization + curriculum + module family in one run unless the blueprint explicitly demands it
+- treat 1024-1536 context as conditional on preserved throughput; do not assume 2048 is the default 5090 proxy regime
 
-Primary objective:
+## Discovery Versus Refinement
 
-- lower `val_bpb`
+Aggressive loop:
 
-Subject to:
+- discovery-first
+- establish viable branch families
+- once a branch is ranking-valid and close enough, hand it off instead of polishing forever
+- use `recommended_phase` from the aggressive campaign: `establish`, `repair`, or `refine`
 
-- valid export
-- valid reload / evaluation path
-- `artifact_bytes < 16,000,000`
-- no unreasonable VRAM explosion
-- simplicity preference
+Ordinary loop:
 
-This repo's current compact 5090 baseline materially under-spends the final artifact budget. Do not assume the best search strategy is to keep the model tiny and only polish optimizer settings. Favor ideas that plausibly improve the final `8xH100` submission regime, including deliberate use of additional bytes.
+- refinement-first
+- operate on ranking-valid contenders
+- prefer post-quant selection, checkpoint choice, carrier-local cleanup, and one-knob refinements
 
-Use the search policy recorded in `.autoresearch/session.json`:
+## Search Priorities
 
-- soft artifact target band and lane are now policy-driven; the frontier pure-model lane defaults much closer to the hard cap than the older compact baseline
-- meaningful improvement threshold: about `0.001 val_bpb` unless the lane policy says otherwise
-- maximum consecutive losing micro-tuning runs before a required structural follow-up: usually `2` or `3`, depending on lane
-- benchmark preflight may reject obviously slow or over-cap branches before the full 300-second proxy
+Highest EV in this repo right now:
 
-## Search Space
+- stable near-cap 11-12 layer carriers
+- late selective quantization and PTQ/post-quant checkpoint choice
+- low-rank Q as a single-axis reallocation tool
+- activation / RoPE / residual-scale variants local to `train.py`
+- localized Canon-style inserts on otherwise stable carriers
 
-Prioritize production-relevant knobs first:
+Lower EV unless strong new evidence appears:
 
-- `d_model`
-- `shared_layers`
-- `recurrence_loops`
-- `tail_layers`
-- `mlp_mult`
-- `adapter_rank`
-- `adapter_alpha`
-- `adapter_targets`
-- `fake_quant_start_step`
-- quantization `clip_percentile`
-- optimizer LR values
-- `train_batch_tokens`
-- `grad_accum_steps`
+- blanket or headline INT4 MLP sweeps
+- heavyweight local-token modules
+- many-axis moonshots in one 5-minute proxy
+- returning to tiny compact recurrent families as the default frontier direction
 
-If artifact usage remains far below the cap, prefer bounded architecture / byte-allocation experiments before endless micro-tuning of optimizer settings.
+## Git Discipline
 
-Prioritize leaderboard-aligned directions that still fit inside `train.py`:
-
-- low-rank Q as a structural reallocation tool
-- packed mixed low-bit quantization beyond MLP-only export
-- per-pattern clip percentile sweeps for post-quant robustness
-- selective higher-precision embeddings / head
-- selective or compensated `~3x` MLP families rather than blanket global `mlp_mult=3`
-- longer context or sliding-window eval when compute is reclaimed elsewhere
-- compute-aware batch / context curricula
-- stronger optimizer bundles with Muon momentum, weight decay, warmdown, and possibly SWA after a structural candidate exists
-- frontier-style initialization or gating ideas that are local to `train.py`
-- simpler local-token modules with better byte/quality tradeoffs than raw scaling of the current line
-
-Split the next serious search into clean branches instead of one blended stack:
-
-- near-full-budget carrier
-- late selective quantization / post-quant soup
-- low-rank Q
-- smarter local-token module
-- activation / rope / residual-scaling variants that stay local to `train.py`
-- XSA or top-layer cache
-- SmearGate / TTT
-- Canon or neighboring-token mixer
-
-Treat the branch list in `.autoresearch/session.json["search_policy"]["campaign_stories"]` as a Ralph-style story board:
-
-- pick exactly one story per iteration
-- do not blur multiple module-writing stories into one change
-- if recent history is narrow, force a story switch rather than another local refinement
-- if the chosen story needs a missing self-contained module in `train.py`, implement it instead of collapsing back to a safe micro-tune
-
-In a fresh session, the first search block should deliberately cover structural axes before settling into local hill-climbing:
-
-- `d_model`
-- `shared_layers` vs `recurrence_loops`
-- `tail_layers`
-- `mlp_mult`
-- `adapter_rank` / `adapter_targets`
-- `fake_quant_start_step` / `clip_percentile`
-
-Avoid spending time on:
-
-- 5090-specific hacks that are unlikely to transfer to H100
-- changes that mainly exploit logging / harness quirks
-- high-complexity tweaks for tiny gains
-- changes that make final single-script submission meaningfully uglier
-- repeating known-losing or strategically low-value moves without a new major hypothesis:
-  - more recurrence/shared-core looping as a main direction
-  - tiny-model compression tricks
-  - blunt `d_model` widening
-  - full `num_kv_heads=8`
-  - near-neighbor context increases above `768` without compute reclamation
-  - compensated global `mlp_mult=3`
-  - pure tail-width nudges
-
-## Search Policy
-
-- Work on a dedicated autoresearch branch. If one does not already exist for the session, create it yourself.
-- Before proposing a new mutation, inspect recent commits so you do not waste runs repeating the same idea.
-- Before proposing a new mutation, inspect `.autoresearch/notes.md` so you do not waste runs repeating the same weak structural idea.
-- Use the 5090 autoresearch loop for broad search:
-  `bash scripts/run_autoresearch_experiment.sh`
-- Keep experiments on a fixed 300-second budget unless the lane policy says otherwise.
-- Treat the aggressive loop as discovery-first and the ordinary loop as refinement-first once a ranking-valid contender exists.
-- Respect benchmark preflight: a benchmark-only rejection still counts as the completed experiment for that invocation.
-- Use `runs/autoresearch_5090/index/latest.json` and `best.json` as the agent-readable state.
-- Prefer simpler wins first, but do not confuse simplicity with shrinking back to the old compact basin.
-- Treat improvements smaller than roughly `0.001 val_bpb` as noise unless they also simplify the code or clearly move the model toward a better production regime.
-- Reject hacks that add complexity for tiny gains.
-- If accepted artifact size is still below the policy target band, do not spend long stretches only micro-tuning optimizer values.
-- Do not spend more than `3` consecutive losing micro-tuning runs without making the next run a structural / byte-allocation experiment.
-- Treat selective float / fake-quant toggles on one or two tensors of the same carrier as micro-tuning, not structural exploration.
-- If the recent-family summary shows a dominant family or a same-family streak of `3+`, force the next run into a different branch family.
-- If the branch switch points to a module-writing story, prefer a minimal working implementation in `train.py` over another carrier-local precision retune.
-- If the accepted artifact is already above roughly `14 MB`, stop slicing late-tensor float groups finer unless the same run also changes carrier structure, batch/context, low-rank-Q placement, or local-token structure.
-- Alternate broader structural probes with local refinements once you find a promising larger-capacity direction.
-- Keep code changes local and legible.
-- If a change risks export/reload parity or structured outputs, do not ship it without tests.
-- If a run fails, inspect `crash.json` and `results.json` before changing code.
-- If a run is worse or not meaningfully better, revert the `train.py` change and move on.
-- Keep the working state near the current best candidate, not a chain of accumulated regressions.
-- Promote only meaningful wins from 5090 search to H100 validation, then to 8xH100 submission rehearsals.
-
-Git discipline:
-
-- Before each run, commit the exact `train.py` experiment to the autoresearch branch.
-- If a run is a meaningful winner, keep that experiment commit as part of the accepted branch history.
-- If a run loses or fails, preserve the failed attempt in history and return to the accepted state with a normal revert commit.
-- Include the run id and resulting `val_bpb` in keep/revert commit messages when practical.
-- Do not use `git reset` to erase experiment history during the loop.
-- Do not accumulate multiple speculative edits without a run in between.
-- Treat the current branch tip plus recent commits as the authoritative memory of accepted state.
-- After each keep/revert decision, update `.autoresearch/session.json` with:
-  `.venv/bin/python scripts/autoresearch_state.py --state_dir ./.autoresearch decide --run_id <run_id> --decision accepted|reverted --results_json <results_json>`
-- If a run is accepted, commit the refreshed tracked files under `state/autoresearch/` and `configs/promoted/` so the next 5090 or H100 host can recover the winner from git alone.
-- After each keep/revert decision, update `.autoresearch/notes.md` with a short hypothesis note so the next fresh Codex iteration can see which structural directions are still open.
+- make one commit for the experiment before running it
+- if a run loses, fails, or is rejected at preflight, preserve it in history and return to accepted state with a normal revert commit
+- do not use `git reset` to erase experiment history during the loop
+- do not accumulate multiple speculative edits without a run in between
+- update session state and notes after each keep/revert decision
 
 Among candidates with similar `val_bpb`, prefer:
 
 1. simpler code
-2. more production-plausible architecture choices
-3. better use of the available artifact budget
-4. lower VRAM
-
-## Promotion Guidance
-
-Use the 5090 tier to identify candidates worth replaying on H100:
-
-- clear `val_bpb` win
-- no export/reload regressions
-- no artifact accounting issues
-- no obvious dependence on 5090-only behavior
-
-Do not treat the 5090 tier as the final contest metric. It is a filter for what deserves expensive H100 time.
-
-## Parameter Golf Alignment
-
-- Default artifact accounting counts `train.py` plus the compressed model blob.
-- Submission-oriented bundle output lives in `output_dir/submission_bundle/`.
-- Keep byte accounting honest: count exact shipped bytes, not rough estimates.
-- Treat 5090 autoresearch as a development tier, not a record-valid run tier.
-- Final record attempts must be reproduced under the official 8xH100 time limits.
+2. ranking-valid results
+3. deliberate byte use near the target band
+4. lower VRAM and cleaner throughput
